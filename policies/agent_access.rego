@@ -16,20 +16,21 @@ agent_permissions := {
 
 # Allow if the agent type has permission for the requested action on the resource
 allow if {
+    not input.token_expired
     perms := agent_permissions[input.agent_type]
     input.resource in perms[input.action]
 }
 
 # Require PII masking for sensitive agent types
 allow if {
+    not input.token_expired
     input.agent_type in {"finance", "hr", "legal"}
     input.metadata.sensitive_masking == "enabled"
     perms := agent_permissions[input.agent_type]
     input.resource in perms[input.action]
 }
 
-# Deny access if the token is expired (evaluated by the API layer)
-deny if {
+reasons contains "token_expired" if {
     input.token_expired == true
 }
 

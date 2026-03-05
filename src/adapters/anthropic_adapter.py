@@ -26,7 +26,7 @@ class AnthropicAdapter(BaseAdapter):
     async def complete(self, request: LLMRequest) -> LLMResponse:
         """Send a messages request to Anthropic."""
         model = request.model or self._default_model
-        payload: dict = {
+        payload: dict[str, object] = {
             "model": model,
             "max_tokens": request.max_tokens,
             "messages": [{"role": "user", "content": request.prompt}],

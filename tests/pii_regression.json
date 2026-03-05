@@ -1,0 +1,435 @@
+[{
+        "id": 1,
+        "description": "email - canonical form",
+        "input": "Contact john.doe@example.com for details.",
+        "should_redact": true,
+        "pii_types": ["email"]
+    },
+    {
+        "id": 2,
+        "description": "email - subdomain",
+        "input": "Reply to user@mail.corp.example.com",
+        "should_redact": true,
+        "pii_types": ["email"]
+    },
+    {
+        "id": 3,
+        "description": "email - plus addressing",
+        "input": "Forwarded to user+tag@example.com",
+        "should_redact": true,
+        "pii_types": ["email"]
+    },
+    {
+        "id": 4,
+        "description": "email - whitespace around @",
+        "input": "Reach out to john.doe @ example.com",
+        "should_redact": true,
+        "pii_types": ["email"]
+    },
+    {
+        "id": 5,
+        "description": "email - mixed case",
+        "input": "Manager email is JOHN.DOE@EXAMPLE.COM",
+        "should_redact": true,
+        "pii_types": ["email"]
+    },
+    {
+        "id": 6,
+        "description": "email - URL-encoded @ (%40)",
+        "input": "Address: john.doe%40example.com",
+        "should_redact": true,
+        "pii_types": ["email"]
+    },
+    {
+        "id": 7,
+        "description": "email - URL-encoded dot in domain (%2E)",
+        "input": "Link: john.doe@example%2Ecom",
+        "should_redact": true,
+        "pii_types": ["email"]
+    },
+    {
+        "id": 8,
+        "description": "email - Unicode fullwidth local part (NFKC normalisation)",
+        "input": "\uff4a\uff4f\uff48\uff4e.doe@example.com is the contact",
+        "should_redact": true,
+        "pii_types": ["email"]
+    },
+    {
+        "id": 9,
+        "description": "email - zero-width space insertion in local part",
+        "input": "Send to john\u200bdoe@example.com",
+        "should_redact": true,
+        "pii_types": ["email"]
+    },
+    {
+        "id": 10,
+        "description": "email - newline splitting domain dot",
+        "input": "Reply to john.doe@example\n.com please",
+        "should_redact": true,
+        "pii_types": ["email"]
+    },
+    {
+        "id": 11,
+        "description": "email - underscore and two-part TLD",
+        "input": "File CC to firstname_lastname@company.co.uk",
+        "should_redact": true,
+        "pii_types": ["email"]
+    },
+    {
+        "id": 12,
+        "description": "email - false positive: @mention with no local part",
+        "input": "@mention not email at all",
+        "should_redact": false,
+        "pii_types": []
+    },
+    {
+        "id": 13,
+        "description": "ssn - canonical with hyphens",
+        "input": "SSN 123-45-6789",
+        "should_redact": true,
+        "pii_types": ["ssn"]
+    },
+    {
+        "id": 14,
+        "description": "ssn - another canonical",
+        "input": "Record shows 234-56-7890",
+        "should_redact": true,
+        "pii_types": ["ssn"]
+    },
+    {
+        "id": 15,
+        "description": "ssn - space separators (no hyphens)",
+        "input": "My SSN is 345 67 8901",
+        "should_redact": true,
+        "pii_types": ["ssn"]
+    },
+    {
+        "id": 16,
+        "description": "ssn - extra whitespace around hyphens",
+        "input": "code 456 - 78 - 9012",
+        "should_redact": true,
+        "pii_types": ["ssn"]
+    },
+    {
+        "id": 17,
+        "description": "ssn - URL-encoded hyphens (%2D)",
+        "input": "value 123%2D45%2D6789 end",
+        "should_redact": true,
+        "pii_types": ["ssn"]
+    },
+    {
+        "id": 18,
+        "description": "ssn - Unicode fullwidth digits (NFKC normalisation)",
+        "input": "SSN: \uff11\uff12\uff13-\uff14\uff15-\uff16\uff17\uff18\uff19",
+        "should_redact": true,
+        "pii_types": ["ssn"]
+    },
+    {
+        "id": 19,
+        "description": "ssn - zero-width space insertion",
+        "input": "reference 123\u200b-45-6789 here",
+        "should_redact": true,
+        "pii_types": ["ssn"]
+    },
+    {
+        "id": 20,
+        "description": "ssn - newline before final hyphen",
+        "input": "token 123-45\n-6789 end",
+        "should_redact": true,
+        "pii_types": ["ssn"]
+    },
+    {
+        "id": 21,
+        "description": "ssn - embedded in a sentence",
+        "input": "The applicant provided SSN 111-22-3333 as their identifier.",
+        "should_redact": true,
+        "pii_types": ["ssn"]
+    },
+    {
+        "id": 22,
+        "description": "ssn - mixed separators (hyphen then space)",
+        "input": "Ref: 223-45 6789",
+        "should_redact": true,
+        "pii_types": ["ssn"]
+    },
+    {
+        "id": 23,
+        "description": "ssn - false positive: forbidden area code 000",
+        "input": "Number 000-45-6789 is invalid",
+        "should_redact": false,
+        "pii_types": []
+    },
+    {
+        "id": 24,
+        "description": "ssn - false positive: forbidden area code 666",
+        "input": "Number 666-12-3456 is invalid",
+        "should_redact": false,
+        "pii_types": []
+    },
+    {
+        "id": 25,
+        "description": "credit_card - Visa with spaces",
+        "input": "Card 4111 1111 1111 1111 expired",
+        "should_redact": true,
+        "pii_types": ["credit_card"]
+    },
+    {
+        "id": 26,
+        "description": "credit_card - Visa with hyphens",
+        "input": "Number: 4111-1111-1111-1111",
+        "should_redact": true,
+        "pii_types": ["credit_card"]
+    },
+    {
+        "id": 27,
+        "description": "credit_card - Visa no separators",
+        "input": "Charged 4111111111111111 today",
+        "should_redact": true,
+        "pii_types": ["credit_card"]
+    },
+    {
+        "id": 28,
+        "description": "credit_card - Mastercard with spaces",
+        "input": "Use card 5500 0000 0000 0004",
+        "should_redact": true,
+        "pii_types": ["credit_card"]
+    },
+    {
+        "id": 29,
+        "description": "credit_card - newline in middle of number",
+        "input": "Card: 4111 1111\n1111 1111 done",
+        "should_redact": true,
+        "pii_types": ["credit_card"]
+    },
+    {
+        "id": 30,
+        "description": "credit_card - tab separator between groups",
+        "input": "4111 1111\t1111 1111 is the number",
+        "should_redact": true,
+        "pii_types": ["credit_card"]
+    },
+    {
+        "id": 31,
+        "description": "credit_card - Unicode fullwidth digits (NFKC normalisation)",
+        "input": "Number \uff14\uff11\uff11\uff11 \uff11\uff11\uff11\uff11 \uff11\uff11\uff11\uff11 \uff11\uff11\uff11\uff11 billed",
+        "should_redact": true,
+        "pii_types": ["credit_card"]
+    },
+    {
+        "id": 32,
+        "description": "credit_card - URL-encoded spaces (%20)",
+        "input": "card 4111%201111%201111%201111 charged",
+        "should_redact": true,
+        "pii_types": ["credit_card"]
+    },
+    {
+        "id": 33,
+        "description": "credit_card - zero-width char insertion",
+        "input": "token 4111\u200b1111 1111 1111 end",
+        "should_redact": true,
+        "pii_types": ["credit_card"]
+    },
+    {
+        "id": 34,
+        "description": "credit_card - labeled in context",
+        "input": "Billing card: 5500-0000-0000-0004 for invoice",
+        "should_redact": true,
+        "pii_types": ["credit_card"]
+    },
+    {
+        "id": 35,
+        "description": "credit_card - false positive: only 12 digits",
+        "input": "Order ID: 1234 5678 9012",
+        "should_redact": false,
+        "pii_types": []
+    },
+    {
+        "id": 36,
+        "description": "credit_card - false positive: PIN of 4 digits",
+        "input": "Enter PIN: 1234",
+        "should_redact": false,
+        "pii_types": []
+    },
+    {
+        "id": 37,
+        "description": "phone_us - US with hyphens",
+        "input": "Call 555-867-5309 now",
+        "should_redact": true,
+        "pii_types": ["phone_us"]
+    },
+    {
+        "id": 38,
+        "description": "phone_us - US with area code parens",
+        "input": "Reach us at (555) 867-5309",
+        "should_redact": true,
+        "pii_types": ["phone_us"]
+    },
+    {
+        "id": 39,
+        "description": "phone_us - US with dot separators",
+        "input": "Contact: 555.867.5309",
+        "should_redact": true,
+        "pii_types": ["phone_us"]
+    },
+    {
+        "id": 40,
+        "description": "phone_us - US with space separators",
+        "input": "Number 555 867 5309",
+        "should_redact": true,
+        "pii_types": ["phone_us"]
+    },
+    {
+        "id": 41,
+        "description": "phone_us - US with no separator",
+        "input": "Dialed 5558675309 today",
+        "should_redact": true,
+        "pii_types": ["phone_us"]
+    },
+    {
+        "id": 42,
+        "description": "phone_us - with +1 country code",
+        "input": "International +1-555-867-5309",
+        "should_redact": true,
+        "pii_types": ["phone_us"]
+    },
+    {
+        "id": 43,
+        "description": "phone_us - country code with parens",
+        "input": "Dial +1 (555) 867-5309 toll-free",
+        "should_redact": true,
+        "pii_types": ["phone_us"]
+    },
+    {
+        "id": 44,
+        "description": "phone_us - URL-encoded plus sign (%2B)",
+        "input": "Contact %2B1-555-867-5309 for support",
+        "should_redact": true,
+        "pii_types": ["phone_us"]
+    },
+    {
+        "id": 45,
+        "description": "phone_us - Unicode fullwidth digits (NFKC normalisation)",
+        "input": "HR: \uff15\uff15\uff15-\uff18\uff16\uff17-\uff15\uff13\uff10\uff19",
+        "should_redact": true,
+        "pii_types": ["phone_us"]
+    },
+    {
+        "id": 46,
+        "description": "phone_us - newline splitting the last group",
+        "input": "Call 555-867\n5309 back",
+        "should_redact": true,
+        "pii_types": ["phone_us"]
+    },
+    {
+        "id": 47,
+        "description": "phone_us - zero-width character insertion",
+        "input": "Hotline 555\u200b-867-5309 available",
+        "should_redact": true,
+        "pii_types": ["phone_us"]
+    },
+    {
+        "id": 48,
+        "description": "phone_us - embedded in sentence",
+        "input": "Please call (800) 555-0100 for customer service.",
+        "should_redact": true,
+        "pii_types": ["phone_us"]
+    },
+    {
+        "id": 49,
+        "description": "phone_us - false positive: 7-digit local number only",
+        "input": "Extension 867-5309",
+        "should_redact": false,
+        "pii_types": []
+    },
+    {
+        "id": 50,
+        "description": "phone_us - false positive: 4-digit extension",
+        "input": "ext 5309",
+        "should_redact": false,
+        "pii_types": []
+    },
+    {
+        "id": 51,
+        "description": "ip_address - RFC 1918 private",
+        "input": "Server at 192.168.1.1 responded",
+        "should_redact": true,
+        "pii_types": ["ip_address"]
+    },
+    {
+        "id": 52,
+        "description": "ip_address - public DNS",
+        "input": "Nameserver 8.8.8.8 unreachable",
+        "should_redact": true,
+        "pii_types": ["ip_address"]
+    },
+    {
+        "id": 53,
+        "description": "ip_address - subnet mask",
+        "input": "Mask 255.255.255.0 applied",
+        "should_redact": true,
+        "pii_types": ["ip_address"]
+    },
+    {
+        "id": 54,
+        "description": "ip_address - loopback",
+        "input": "Listening on 127.0.0.1",
+        "should_redact": true,
+        "pii_types": ["ip_address"]
+    },
+    {
+        "id": 55,
+        "description": "ip_address - extra whitespace around dots",
+        "input": "Host 192 . 168 . 1 . 1 blocked",
+        "should_redact": true,
+        "pii_types": ["ip_address"]
+    },
+    {
+        "id": 56,
+        "description": "ip_address - URL-encoded dots (%2E)",
+        "input": "Block 192%2E168%2E1%2E1 immediately",
+        "should_redact": true,
+        "pii_types": ["ip_address"]
+    },
+    {
+        "id": 57,
+        "description": "ip_address - Unicode fullwidth digits (NFKC normalisation)",
+        "input": "Origin: \uff11\uff19\uff12.\uff11\uff16\uff18.\uff11.\uff11",
+        "should_redact": true,
+        "pii_types": ["ip_address"]
+    },
+    {
+        "id": 58,
+        "description": "ip_address - zero-width character insertion",
+        "input": "Address 10.0.0\u200b.1 flagged",
+        "should_redact": true,
+        "pii_types": ["ip_address"]
+    },
+    {
+        "id": 59,
+        "description": "ip_address - newline before final dot",
+        "input": "Host 172.16.254\n.1 is internal",
+        "should_redact": true,
+        "pii_types": ["ip_address"]
+    },
+    {
+        "id": 60,
+        "description": "ip_address - embedded in a sentence",
+        "input": "The attacker originated from 10.0.0.1 on the internal network.",
+        "should_redact": true,
+        "pii_types": ["ip_address"]
+    },
+    {
+        "id": 61,
+        "description": "ip_address - false positive: invalid octet values >255",
+        "input": "Config error 999.999.999.999 invalid",
+        "should_redact": false,
+        "pii_types": []
+    },
+    {
+        "id": 62,
+        "description": "ip_address - false positive: version prefix prevents word boundary",
+        "input": "Python v3.11.14.0 released",
+        "should_redact": false,
+        "pii_types": []
+    }
+]

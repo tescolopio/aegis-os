@@ -1,0 +1,58 @@
+repos:
+  # ---------------------------------------------------------------------------
+  # Ruff: lint + import sort (replaces flake8 / isort / pyupgrade / bandit)
+  # ---------------------------------------------------------------------------
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.7.0
+    hooks:
+      - id: ruff
+        args: [--fix]
+        types_or: [python, pyi]
+
+  # ---------------------------------------------------------------------------
+  # Mypy: strict static type checking
+  # ---------------------------------------------------------------------------
+  - repo: local
+    hooks:
+      - id: mypy
+        name: mypy (strict)
+        language: system
+        entry: mypy src/
+        pass_filenames: false
+        types: [python]
+
+  # ---------------------------------------------------------------------------
+  # Audit schema conformance — runs whenever logger.py or the schema changes.
+  # Fires tests/test_schema_validity.py which covers:
+  #   • schema self-validation (Draft7Validator.check_schema)
+  #   • 20 real AuditLogger events conformance
+  #   • 10 negative conformance (malformed events must be rejected)
+  #   • $schema and version field assertions
+  # ---------------------------------------------------------------------------
+  - repo: local
+    hooks:
+      - id: audit-schema-conformance
+        name: Audit event schema conformance
+        language: system
+        entry: pytest tests/test_schema_validity.py -x -q --no-header --no-cov
+        pass_filenames: false
+        files: ^(src/audit_vault/logger\.py|docs/audit-event-schema\.json)$
+        types: [python]
+
+  # ---------------------------------------------------------------------------
+  # Branding scan — no "Governance Sandwich" references (F1-2 pre-gate guard)
+  # ---------------------------------------------------------------------------
+  - repo: local
+    hooks:
+      - id: branding-scan
+        name: Branding scan (no Governance Sandwich)
+        language: system
+        entry: >-
+          python -c "
+          import sys, pathlib;
+          hits = [str(p) for p in pathlib.Path('.').rglob('*.md')
+                  if 'governance sandwich' in p.read_text().lower()];
+          sys.exit(0) if not hits else (print(f'FAIL: found Governance Sandwich in {hits}'), sys.exit(1))
+          "
+        pass_filenames: false
+        files: \.md$

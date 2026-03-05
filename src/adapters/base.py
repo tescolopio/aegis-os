@@ -2,7 +2,7 @@
 
 from abc import ABC, abstractmethod
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 class LLMRequest(BaseModel):
@@ -13,6 +13,10 @@ class LLMRequest(BaseModel):
     max_tokens: int = 1024
     temperature: float = 0.7
     system_prompt: str = ""
+    # Orchestrator-level metadata injected by the governance pipeline.
+    # ``aegis_token`` is always present in production; adapters may inspect or
+    # forward this field but must never expose it to end users.
+    metadata: dict[str, str] = Field(default_factory=dict)
 
 
 class LLMResponse(BaseModel):

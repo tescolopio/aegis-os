@@ -1,0 +1,73 @@
+name: Audit Schema Conformance
+
+# Runs on every push or PR that touches the audit logger or the schema file.
+# A failing run blocks merge — no schema regression may slip through.
+on:
+  push:
+    paths:
+      - "src/audit_vault/logger.py"
+      - "docs/audit-event-schema.json"
+      - "tests/test_schema_validity.py"
+  pull_request:
+    paths:
+      - "src/audit_vault/logger.py"
+      - "docs/audit-event-schema.json"
+      - "tests/test_schema_validity.py"
+  # Allow manual trigger for gate reviews.
+  workflow_dispatch:
+
+jobs:
+  audit-schema-conformance:
+    name: Schema self-validation & conformance
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    defaults:
+      run:
+        # All steps run inside the conda environment — consistent with local dev.
+        shell: bash -el {0}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Miniconda (conda aegis)
+        uses: conda-incubator/setup-miniconda@v3
+        with:
+          python-version: "3.11"
+          environment-file: environment.yml
+          activate-environment: aegis
+          auto-activate-base: false
+          miniforge-variant: Mambaforge
+          use-mamba: true
+
+      - name: Install project and dev dependencies
+        run: pip install -e ".[dev]"
+
+      - name: Run audit schema conformance tests
+        run: |
+          pytest tests/test_schema_validity.py \
+            -v \
+            --tb=short \
+            --no-header \
+            --no-cov \
+            -q
+
+      - name: Assert $schema and version fields
+        # Belt-and-suspenders: verify the schema key fields outside pytest too,
+        # so a broken test file can never hide a schema regression.
+        run: |
+          python - <<'EOF'
+          import json, sys
+          schema = json.load(open("docs/audit-event-schema.json"))
+          errors = []
+          if schema.get("$schema") != "http://json-schema.org/draft-07/schema#":
+              errors.append(f"$schema is {schema.get('$schema')!r}, expected 'http://json-schema.org/draft-07/schema#'")
+          if schema.get("version") != "0.1.0":
+              errors.append(f"version is {schema.get('version')!r}, expected '0.1.0'")
+          if errors:
+              for e in errors:
+                  print(f"::error::{e}")
+              sys.exit(1)
+          print("Schema $schema and version fields OK")
+          EOF

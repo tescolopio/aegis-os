@@ -1,0 +1,125 @@
+{
+    "$schema": "http://json-schema.org/draft-07/schema#",
+    "version": "0.1.0",
+    "$id": "https://aegis-os.io/schemas/audit-event/0.1.0",
+    "title": "Aegis-OS Audit Event",
+    "description": "Immutable, structured audit event emitted by AuditLogger at every governance stage, lifecycle transition, and policy decision. This schema is the open standard v0.1 output of the Aegis Governance Loop.",
+    "type": "object",
+    "required": ["event", "level", "timestamp"],
+    "additionalProperties": false,
+    "properties": {
+        "event": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Dot-delimited event type identifier (e.g. 'token_issued', 'policy_denied', 'aegis.startup')."
+        },
+        "level": {
+            "type": "string",
+            "enum": ["debug", "info", "warning", "error"],
+            "description": "Structlog severity level emitted by the add_log_level processor."
+        },
+        "timestamp": {
+            "type": "string",
+            "format": "date-time",
+            "description": "ISO 8601 UTC timestamp of when the event was emitted (e.g. '2026-03-04T10:00:00.000000Z')."
+        },
+        "task_id": {
+            "type": "string",
+            "description": "UUID of the orchestration task that generated this event."
+        },
+        "agent_type": {
+            "type": "string",
+            "description": "Logical agent type classification (e.g. 'finance', 'hr', 'it')."
+        },
+        "requester_id": {
+            "type": "string",
+            "description": "Stable identity of the human or service that initiated the agent task."
+        },
+        "agent_id": {
+            "type": "string",
+            "description": "Identifier of the specific agent instance emitting a security-relevant event."
+        },
+        "action": {
+            "type": "string",
+            "description": "Action being performed or that was attempted (e.g. 'llm.complete', 'token.issue')."
+        },
+        "resource": {
+            "type": "string",
+            "description": "Resource URI or name that the action targets (e.g. 'model:gpt-4o-mini')."
+        },
+        "outcome": {
+            "type": "string",
+            "description": "Result of the action — e.g. 'allow', 'deny', 'redact', 'success', 'failure', 'error'."
+        },
+        "error_message": {
+            "type": "string",
+            "description": "Human-readable error description. Present when outcome is 'error' or 'failure'."
+        },
+        "pii_types": {
+            "type": "array",
+            "items": { "type": "string" },
+            "description": "PII class labels detected and redacted (e.g. ['email', 'ssn']). Present when outcome is 'redact'."
+        },
+        "model": {
+            "type": "string",
+            "description": "LLM model identifier. Present in the llm-invoke stage."
+        },
+        "tokens_used": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Token count returned by the LLM adapter. Present in the llm-invoke stage."
+        },
+        "error": {
+            "type": "string",
+            "description": "Human-readable error description when an exception or failure is logged."
+        },
+        "reasons": {
+            "type": "array",
+            "items": { "type": "string" },
+            "description": "OPA policy denial reasons or other structured rationale strings."
+        },
+        "fields": {
+            "type": "array",
+            "items": { "type": "string" },
+            "description": "Field names targeted by a policy masking operation (e.g. ['prompt'])."
+        },
+        "jti": {
+            "type": "string",
+            "description": "JWT unique token identifier (jti claim) from the JIT session token."
+        },
+        "budget_session_id": {
+            "type": "string",
+            "description": "UUID of the budget-enforcement session associated with this event."
+        },
+        "token_agent_type": {
+            "type": "string",
+            "description": "Agent type encoded inside the presented JIT session token."
+        },
+        "request_agent_type": {
+            "type": "string",
+            "description": "Agent type declared by the current in-flight request (may differ from token)."
+        },
+        "message": {
+            "type": "string",
+            "description": "Free-form human-readable message for lifecycle events such as startup and shutdown."
+        },
+        "workflow_id": {
+            "type": "string",
+            "description": "Temporal workflow identifier for events emitted by the Scheduler."
+        },
+        "metadata": {
+            "type": "object",
+            "additionalProperties": { "type": "string" },
+            "description": "Arbitrary string key-value pairs attached to the request or event."
+        },
+        "sequence_number": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Monotonically increasing sequence number within a task run — used for gap and duplicate detection."
+        },
+        "stage": {
+            "type": "string",
+            "description": "Named pipeline stage at which this event was emitted (e.g. 'pre-pii-scrub', 'policy-eval')."
+        }
+    }
+}

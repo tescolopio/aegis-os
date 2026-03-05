@@ -10,6 +10,25 @@ from pydantic import BaseModel
 from src.config import settings
 
 
+class TokenScopeError(PermissionError):
+    """Raised when a presented JIT token is scoped to a different ``agent_type``
+    than the one named in the current request.
+
+    A token issued for ``agent_type="finance"`` must never be accepted for a
+    request that declares ``agent_type="hr"``.  This prevents privilege
+    escalation across agent-type boundaries.
+    """
+
+
+class TokenExpiredError(PermissionError):
+    """Raised when a presented JIT token has passed its ``exp`` timestamp.
+
+    The orchestrator must not forward the request to the LLM adapter after
+    raising this error.  An audit event is emitted before the raise so the
+    expiry is visible in the immutable audit trail.
+    """
+
+
 class TokenClaims(BaseModel):
     """Claims embedded in a JIT agent session token."""
 

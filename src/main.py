@@ -1,10 +1,23 @@
 """Aegis-OS Control Plane API entry point."""
 
 from fastapi import FastAPI
+from opentelemetry import trace
+from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.trace.export import BatchSpanProcessor, ConsoleSpanExporter
 from prometheus_client import make_asgi_app
 
 from src.audit_vault.logger import AuditLogger
 from src.control_plane.router import router as control_router
+
+# ---------------------------------------------------------------------------
+# OpenTelemetry provider setup
+# Must be configured before any AuditLogger or tracer is created.
+# In production, replace ConsoleSpanExporter with an OTLP exporter via
+# environment-variable-driven SDK auto-configuration.
+# ---------------------------------------------------------------------------
+_otel_provider = TracerProvider()
+_otel_provider.add_span_processor(BatchSpanProcessor(ConsoleSpanExporter()))
+trace.set_tracer_provider(_otel_provider)
 
 app = FastAPI(
     title="Aegis-OS Control Plane",

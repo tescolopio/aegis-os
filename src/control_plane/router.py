@@ -1,4 +1,9 @@
-"""Control Plane Router - decides which agent handles which sub-task."""
+"""Control Plane Router - decides which agent handles which sub-task.
+
+All LLM execution MUST be routed through ``orchestrator.run()``.  Governance
+modules (Guardrails, OPA, SessionManager) must never be called directly from
+this module – they are the orchestrator's exclusive responsibility.
+"""
 
 from enum import StrEnum
 from uuid import UUID, uuid4
@@ -7,11 +12,34 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
 from src.audit_vault.logger import AuditLogger
-from src.governance.session_mgr import SessionManager
+from src.control_plane.orchestrator import (
+    BudgetLimitError,
+    Orchestrator,
+    OrchestratorRequest,
+    OrchestratorResult,
+)
 
 router = APIRouter(tags=["control-plane"])
 _logger = AuditLogger()
-_session_mgr = SessionManager()
+
+# Module-level orchestrator instance – set at application startup via
+# ``configure_orchestrator()``.  Tests replace this with a mock.
+_orchestrator: Orchestrator | None = None
+
+
+def configure_orchestrator(orc: Orchestrator) -> None:
+    """Inject the orchestrator instance (called during app startup)."""
+    global _orchestrator  # noqa: PLW0603
+    _orchestrator = orc
+
+
+def _require_orchestrator() -> Orchestrator:
+    if _orchestrator is None:
+        raise RuntimeError(
+            "Orchestrator has not been configured.  "
+            "Call configure_orchestrator() during app startup."
+        )
+    return _orchestrator
 
 
 class AgentType(StrEnum):
@@ -23,23 +51,57 @@ class AgentType(StrEnum):
 
 
 class TaskRequest(BaseModel):
+    """Incoming agent task — carries everything the orchestrator pipeline needs."""
+
     task_id: UUID = Field(default_factory=uuid4)
-    description: str = Field(..., min_length=1, max_length=4096)
+    prompt: str = Field(..., min_length=1, max_length=32_768)
+    description: str = Field(default="", max_length=4096)
     agent_type: AgentType = AgentType.GENERAL
     requester_id: str = Field(..., min_length=1, max_length=256)
+    model: str = "gpt-4o-mini"
+    max_tokens: int = 1024
+    temperature: float = 0.7
+    system_prompt: str = ""
     metadata: dict[str, str] = Field(default_factory=dict)
 
 
 class TaskResponse(BaseModel):
+    """Unified response returned from POST /tasks after full pipeline execution."""
+
     task_id: UUID
     agent_type: AgentType
     session_token: str
     message: str
+    tokens_used: int = 0
+    model: str = ""
+    pii_found: list[str] = Field(default_factory=list)
+
+
+class ExecuteRequest(BaseModel):
+    """Request body for the LLM execution endpoint."""
+
+    task_id: UUID = Field(default_factory=uuid4)
+    prompt: str = Field(..., min_length=1, max_length=32_768)
+    agent_type: AgentType = AgentType.GENERAL
+    requester_id: str = Field(..., min_length=1, max_length=256)
+    session_token: str | None = None
+    model: str = "gpt-4o-mini"
+    max_tokens: int = 1024
+    temperature: float = 0.7
+    system_prompt: str = ""
+    metadata: dict[str, str] = Field(default_factory=dict)
 
 
 @router.post("/tasks", response_model=TaskResponse)
 async def route_task(request: TaskRequest) -> TaskResponse:
-    """Route an incoming task to the appropriate agent and issue a scoped session token."""
+    """Execute a task through the full governance pipeline and return the LLM result.
+
+    All governance enforcement (PII scrubbing, OPA policy evaluation, JIT session
+    token issuance) is performed exclusively by the orchestrator.  This handler
+    must not call any governance module directly.
+    """
+    orc = _require_orchestrator()
+
     _logger.info(
         "task.routing",
         task_id=str(request.task_id),
@@ -48,13 +110,32 @@ async def route_task(request: TaskRequest) -> TaskResponse:
     )
 
     try:
-        token = _session_mgr.issue_token(
-            agent_type=request.agent_type.value,
-            requester_id=request.requester_id,
-            metadata=request.metadata,
+        result: OrchestratorResult = await orc.run(
+            OrchestratorRequest(
+                task_id=request.task_id,
+                prompt=request.prompt,
+                agent_type=request.agent_type.value,
+                requester_id=request.requester_id,
+                model=request.model,
+                max_tokens=request.max_tokens,
+                temperature=request.temperature,
+                system_prompt=request.system_prompt,
+                metadata=request.metadata,
+            )
         )
+    except BudgetLimitError as exc:
+        raise HTTPException(status_code=429, detail=str(exc)) from exc
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        _logger.error(
+            "task.error",
+            task_id=str(request.task_id),
+            error=str(exc),
+        )
+        raise HTTPException(status_code=500, detail="Internal pipeline error") from exc
 
     _logger.info(
         "task.routed",
@@ -63,11 +144,65 @@ async def route_task(request: TaskRequest) -> TaskResponse:
     )
 
     return TaskResponse(
-        task_id=request.task_id,
+        task_id=result.task_id,
         agent_type=request.agent_type,
-        session_token=token,
-        message=f"Task routed to {request.agent_type.value} agent",
+        session_token=result.session_token,
+        message=result.response.content,
+        tokens_used=result.response.tokens_used,
+        model=result.response.model,
+        pii_found=list(
+            dict.fromkeys(result.pii_found_in_prompt + result.pii_found_in_response)
+        ),
     )
+
+
+@router.post("/tasks/execute", response_model=OrchestratorResult)
+async def execute_task(request: ExecuteRequest) -> OrchestratorResult:
+    """Execute a task through the full orchestration pipeline.
+
+    All governance enforcement (PII scrubbing, policy evaluation, session token
+    issuance) is handled exclusively by the orchestrator.  This handler must
+    not call any governance module directly.
+    """
+    orc = _require_orchestrator()
+
+    _logger.info(
+        "task.execute",
+        task_id=str(request.task_id),
+        agent_type=request.agent_type,
+        requester_id=request.requester_id,
+    )
+
+    try:
+        result: OrchestratorResult = await orc.run(
+            OrchestratorRequest(
+                task_id=request.task_id,
+                prompt=request.prompt,
+                agent_type=request.agent_type.value,
+                requester_id=request.requester_id,
+                session_token=request.session_token,
+                model=request.model,
+                max_tokens=request.max_tokens,
+                temperature=request.temperature,
+                system_prompt=request.system_prompt,
+                metadata=request.metadata,
+            )
+        )
+    except BudgetLimitError as exc:
+        raise HTTPException(status_code=429, detail=str(exc)) from exc
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        _logger.error(
+            "task.execute.error",
+            task_id=str(request.task_id),
+            error=str(exc),
+        )
+        raise HTTPException(status_code=500, detail="Internal pipeline error") from exc
+
+    return result
 
 
 @router.get("/tasks/{task_id}")

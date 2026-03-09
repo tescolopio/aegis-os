@@ -31,12 +31,12 @@ Long-lived API keys have a large blast radius if compromised.
 
 ## Decision
 
-Issue short-lived (15-minute) JWT tokens scoped to a specific agent type and requester via `src/governance/session_mgr.py`. Tokens are signed with a secret stored in HashiCorp Vault.
+Issue short-lived (15-minute) JWT tokens scoped to a specific agent type and requester via `src/governance/session_mgr.py`. The current production direction is sender-constrained `ES256` tokens backed by Vault-managed signing material and bound to DPoP proofs where protected downstream calls require proof-of-possession. Legacy `HS256` bearer-token validation may remain enabled only as a temporary compatibility path during migration.
 
 ## Consequences
 
 - **Positive**: Compromised tokens expire quickly.  
-- **Positive**: Token scope limits lateral movement.  
+- **Positive**: Token scope limits lateral movement, and DPoP binding reduces replay value for protected flows.  
 - **Negative**: Agents must renew tokens; handled transparently by the Control Plane.
 
 ---
@@ -228,7 +228,7 @@ When a `LoopDetector` raises `PendingApprovalError`, the orchestrator must pause
 | State | Description |
 |---|---|
 | `Running` | Workflow is executing normally through the five pipeline stages. |
-| `PendingApproval` | Execution is paused; awaiting an `ops_lead` approve or deny action. |
+| `PendingApproval` | Execution is paused; awaiting an authorised `admin` approve or deny action. |
 | `Approved` | An authorised operator approved resumed execution. |
 | `Denied` | An authorised operator denied resumed execution; workflow terminates. |
 | `Completed` | Workflow ran to successful completion. |
@@ -237,16 +237,16 @@ When a `LoopDetector` raises `PendingApprovalError`, the orchestrator must pause
 **Transitions:**
 
 - `Running → PendingApproval`: `PendingApprovalError` raised by `LoopDetector.record_step()`.
-- `PendingApproval → Approved`: `approve` action submitted by an `ops_lead` RBAC principal.
-- `PendingApproval → Denied`: `deny` action submitted by an `ops_lead` RBAC principal.
-- `PendingApproval → Failed` (timeout): 24 h elapsed without an approve or deny action. Prometheus `HITLApprovalStuck` alert fires at this threshold.
+- `PendingApproval → Approved`: `approve` action submitted by an `admin` RBAC principal.
+- `PendingApproval → Denied`: `deny` action submitted by an `admin` RBAC principal.
+- `PendingApproval → Failed` (timeout): 24 h elapsed without an approve or deny action. Prometheus `aegis_hitl_stuck` alert fires at this threshold.
 - `Approved → Completed`: Resumed execution completes all remaining pipeline stages.
 - `Denied / Timeout → Failed`: Task is marked failed; a `task.denied` or `task.failed` audit event is emitted.
 
 ## Decision
 
-Model `PendingApproval` as an explicit Temporal workflow state gated by a signal channel. The `ApprovalSignal` (approve/deny) is sent externally via the `/api/v1/workflows/{id}/approve` and `/api/v1/workflows/{id}/deny` endpoints (Phase 2).  
-RBAC enforcement uses the `rbac_capabilities` map in `policies/agent_access.rego`; only `ops_lead` principals may send the signal.
+Model `PendingApproval` as an explicit Temporal workflow state gated by a signal channel. The `ApprovalSignal` (approve/deny) is sent externally via the `/api/v1/tasks/{task_id}/approve` and `/api/v1/tasks/{task_id}/deny` endpoints (Phase 2).  
+RBAC enforcement uses the `rbac_capabilities` map in `policies/agent_access.rego`; the live matrix currently allows only `admin` principals to send the signal.
 
 ## Consequences
 
@@ -257,6 +257,181 @@ RBAC enforcement uses the `rbac_capabilities` map in `policies/agent_access.rego
 ---
 
 # ADR-010: Write-Once Audit Backend — Signed PostgreSQL vs. AWS QLDB
+
+---
+
+# ADR-011: Sender-Constrained Session Tokens with ES256 + DPoP
+
+**Status**: Proposed  
+**Date**: 2026-03-06  
+**Deciders**: Aegis-OS Core Team (Platform, Security & Governance)
+
+## Context
+
+`SessionManager` currently issues short-lived scoped bearer JWTs. The 15-minute
+TTL, `agent_type` scope, `allowed_actions`, and revocable `jti` claims reduce
+blast radius, but the token is still a bearer credential: if the token string
+is exfiltrated, it can be replayed until expiry unless the `jti` is revoked.
+
+Moving from `HS256` to an asymmetric algorithm improves key distribution but
+does **not** by itself prevent replay. To materially reduce token replay risk,
+the token must be sender-constrained so that the caller proves possession of a
+private key on every request.
+
+## Decision
+
+Refactor `src/governance/session_mgr.py` from a shared-secret bearer-only
+issuer into a dual-mode identity component that supports both:
+
+- legacy short-lived bearer JWTs for backward compatibility; and
+- sender-constrained access tokens signed with `ES256` and bound to a DPoP
+     public key via `cnf.jkt`.
+
+The refactored `SessionManager` now exposes the following DPoP-oriented
+capabilities:
+
+- `issue_sender_constrained_token(...)`
+- `issue_dpop_proof(...)`
+- `validate_dpop_proof(...)`
+- `validate_sender_constrained_token(...)`
+- `public_jwk_thumbprint(...)`
+- `generate_dpop_key_pair()`
+
+## Design
+
+### Access Token Format
+
+Sender-constrained access tokens continue to carry the existing claims used by
+the orchestrator, but add token binding material:
+
+```json
+{
+     "jti": "token-uuid",
+     "sub": "requester-or-agent-id",
+     "agent_type": "finance",
+     "session_id": "session-uuid",
+     "task_id": "task-uuid",
+     "allowed_actions": ["llm.invoke"],
+     "role": "ops_lead",
+     "iat": 1741257600,
+     "exp": 1741258500,
+     "metadata": {"provider": "openai"},
+     "cnf": {
+          "jkt": "base64url(sha256(jwk-thumbprint-input))"
+     }
+}
+```
+
+`cnf.jkt` is the RFC 7638 thumbprint of the client public JWK that is allowed
+to present the token.
+
+### DPoP Proof Format
+
+Each protected request carries a proof JWT in the `DPoP` header. The proof is
+signed by the client private key and embeds the corresponding public JWK in the
+protected header:
+
+```json
+{
+     "header": {
+          "typ": "dpop+jwt",
+          "alg": "ES256",
+          "jwk": {
+               "kty": "EC",
+               "crv": "P-256",
+               "x": "...",
+               "y": "..."
+          }
+     },
+     "payload": {
+          "jti": "proof-uuid",
+          "htm": "POST",
+          "htu": "https://api.example.test/v1/llm",
+          "iat": 1741257600,
+          "ath": "base64url(sha256(access-token))"
+     }
+}
+```
+
+### Verification Flow
+
+1. Validate the access token signature with `ES256` verification key material.
+2. Extract `cnf.jkt` from the token claims.
+3. Extract the embedded public JWK from the DPoP proof header.
+4. Compute the JWK thumbprint and compare it to `cnf.jkt`.
+5. Verify the DPoP proof signature using the embedded public key.
+6. Validate `htm`, `htu`, `iat`, optional `nonce`, and `ath`.
+7. Reject a reused proof `jti` via a replay store.
+8. Only then permit the protected action.
+
+### Why This Differentiates Aegis
+
+Aegis is not merely changing JWT algorithms. The differentiator is that JIT
+agent identity becomes:
+
+- short-lived,
+- task-bound,
+- policy-scoped,
+- sender-constrained, and
+- auditable across retries and workflow resumes.
+
+That is a materially stronger security posture than bearer-only tokens,
+especially for agent-to-tool and control-plane-to-provider requests.
+
+## Migration Plan
+
+### Phase 1 — Introduce asymmetric signing without changing caller behaviour
+
+- Add `AEGIS_TOKEN_PRIVATE_KEY` and `AEGIS_TOKEN_PUBLIC_KEY`.
+- Switch signing from `HS256` to `ES256` in non-production environments first.
+- Keep `issue_token()` and `validate_token()` API stable so current callers do
+     not break.
+- Continue allowing bearer validation while asymmetric key distribution is
+     rolled out.
+
+### Phase 2 — Add sender-constrained token issuance
+
+- Teach agents, SDKs, or workload sidecars to generate an EC P-256 key pair.
+- Issue tokens via `issue_sender_constrained_token(...)` with `cnf.jkt`.
+- Include `task_id`, `session_id`, and `allowed_actions` in every issued token.
+- Emit audit events for token issuance that include `jti`, `task_id`, and the
+     `cnf.jkt` thumbprint.
+
+### Phase 3 — Require DPoP proofs on protected calls
+
+- Attach a `DPoP` proof to every call that uses an Aegis-issued session token.
+- Verify proof signature, `htu`, `htm`, `iat`, `ath`, and replay state.
+- Reject unbound proofs and mismatched public keys.
+- Add audit events for `dpop.proof.validated`, `dpop.proof.replayed`, and
+     `dpop.proof.rejected`.
+
+### Phase 4 — Replace in-memory replay protection with a durable store
+
+- Move proof-`jti` replay tracking from process memory to Redis or another
+     low-latency shared store.
+- Preserve proof replay resistance across API replica failover and process
+     restarts.
+- Store replay entries with TTL equal to the DPoP acceptance window.
+
+### Phase 5 — Disable bearer-only mode
+
+- Reject bearer tokens that do not carry `cnf.jkt` for sensitive actions.
+- Restrict bearer-only validation to explicit backward-compatibility paths, if
+     any remain.
+- Update SDKs, docs, and deployment runbooks so sender-constrained access is
+     the default operating mode.
+
+## Consequences
+
+- **Positive**: Token theft becomes significantly less useful because the
+     attacker also needs the bound private key.
+- **Positive**: Asymmetric verification removes the need to distribute the
+     signing secret to every verifier.
+- **Positive**: `task_id` + `cnf.jkt` provides stronger audit correlation for
+     workflow retries, handoffs, and revocations.
+- **Negative**: DPoP adds key lifecycle management and replay-state storage.
+- **Negative**: In-memory replay protection is suitable for development but not
+     for a multi-replica production deployment.
 
 **Status**: Accepted (recommendation)  
 **Date**: 2026-03-05  

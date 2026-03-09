@@ -16,7 +16,15 @@
 
 import httpx
 
-from src.adapters.base import BaseAdapter, LLMRequest, LLMResponse
+from src.adapters.base import (
+    AdapterSecurityError,
+    BaseAdapter,
+    LLMRequest,
+    LLMResponse,
+    require_sender_constrained_request,
+)
+from src.audit_vault.logger import AuditLogger
+from src.governance.session_mgr import DPoPReplayError, SessionManager
 
 
 class AnthropicAdapter(BaseAdapter):
@@ -29,16 +37,74 @@ class AnthropicAdapter(BaseAdapter):
     BASE_URL = "https://api.anthropic.com/v1"
     ANTHROPIC_VERSION = "2023-06-01"
 
-    def __init__(self, api_key: str, default_model: str = "claude-3-5-haiku-20241022") -> None:
+    def __init__(
+        self,
+        api_key: str,
+        default_model: str = "claude-3-5-haiku-20241022",
+        session_mgr: SessionManager | None = None,
+        audit_logger: AuditLogger | None = None,
+    ) -> None:
         self._api_key = api_key
         self._default_model = default_model
+        self._session_mgr = session_mgr if session_mgr is not None else SessionManager()
+        self._audit = audit_logger if audit_logger is not None else AuditLogger("anthropic-adapter")
 
     @property
     def provider_name(self) -> str:
         return "anthropic"
 
+    def outbound_request_binding(self, request: LLMRequest) -> tuple[str, str] | None:
+        return ("POST", f"{self.BASE_URL}/messages")
+
     async def complete(self, request: LLMRequest) -> LLMResponse:
         """Send a messages request to Anthropic."""
+        binding = self.outbound_request_binding(request)
+        if binding is not None:
+            method, url = binding
+            try:
+                claims = require_sender_constrained_request(
+                    request,
+                    session_mgr=self._session_mgr,
+                    http_method=method,
+                    http_url=url,
+                )
+            except AdapterSecurityError as exc:
+                token = request.metadata.get("aegis_token", "")
+                task_id = "unknown"
+                agent_type = "unknown"
+                if token:
+                    try:
+                        token_claims = self._session_mgr.validate_token(token)
+                        task_id = token_claims.task_id or "unknown"
+                        agent_type = token_claims.agent_type
+                    except Exception:
+                        pass
+                event_name = (
+                    "dpop.proof.replayed"
+                    if isinstance(exc.__cause__, DPoPReplayError)
+                    else "dpop.proof.rejected"
+                )
+                self._audit.stage_event(
+                    event_name,
+                    outcome="deny",
+                    stage="llm-invoke",
+                    task_id=task_id,
+                    agent_type=agent_type,
+                    provider=self.provider_name,
+                    error_message=str(exc),
+                )
+                raise
+            if claims is not None:
+                self._audit.stage_event(
+                    "dpop.proof.validated",
+                    outcome="allow",
+                    stage="llm-invoke",
+                    task_id=claims.task_id or "unknown",
+                    agent_type=claims.agent_type,
+                    provider=self.provider_name,
+                    jti=claims.jti,
+                )
+
         model = request.model or self._default_model
         payload: dict[str, object] = {
             "model": model,
@@ -50,7 +116,7 @@ class AnthropicAdapter(BaseAdapter):
 
         async with httpx.AsyncClient(timeout=30.0) as client:
             response = await client.post(
-                f"{self.BASE_URL}/messages",
+                url,
                 json=payload,
                 headers={
                     "x-api-key": self._api_key,

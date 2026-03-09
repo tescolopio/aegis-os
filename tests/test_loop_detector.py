@@ -738,3 +738,70 @@ class TestLoopDetectorSerialization:
         assert restored_ctx.steps[0].token_delta == 99
 
 
+def test_loop_counter_preserved_on_retry() -> None:
+    """W2-2: restored retry state continues the NO_PROGRESS counter instead of resetting."""
+    sid = uuid4()
+    det = LoopDetector(max_agent_steps=5, max_token_velocity=1_000)
+    det.create_context(sid, agent_type="finance")
+    det.record_step(sid, token_delta=10, signal=LoopSignal.NO_PROGRESS)
+    det.record_step(sid, token_delta=10, signal=LoopSignal.NO_PROGRESS)
+
+    restored = LoopDetector(max_agent_steps=5, max_token_velocity=1_000)
+    restored.restore(det.checkpoint(sid))
+    ctx = restored.record_step(sid, token_delta=10, signal=LoopSignal.NO_PROGRESS)
+
+    assert len(ctx.steps) == 3
+    assert ctx.steps[-1].step_number == 3
+
+
+def test_loop_retry_does_not_reset_counter() -> None:
+    """W2-2: retrying the same step shape still advances cumulative loop state."""
+    sid = uuid4()
+    det = LoopDetector(max_agent_steps=3, max_token_velocity=1_000)
+    det.create_context(sid, agent_type="finance")
+    det.record_step(sid, token_delta=10, signal=LoopSignal.NO_PROGRESS, description="retryable")
+    det.record_step(sid, token_delta=10, signal=LoopSignal.NO_PROGRESS, description="retryable")
+
+    with pytest.raises(LoopDetectedError):
+        det.record_step(sid, token_delta=10, signal=LoopSignal.NO_PROGRESS, description="retryable")
+
+
+def test_loop_checkpoint_round_trip() -> None:
+    """W2-2: checkpoint/restore keeps the detector on the same trip boundary."""
+    sid = uuid4()
+    det = LoopDetector(max_agent_steps=5, max_token_velocity=1_000)
+    det.create_context(sid, agent_type="finance")
+    det.record_step(sid, token_delta=10, signal=LoopSignal.NO_PROGRESS)
+    det.record_step(sid, token_delta=10, signal=LoopSignal.NO_PROGRESS)
+    det.record_step(sid, token_delta=10, signal=LoopSignal.NO_PROGRESS)
+
+    restored = LoopDetector(max_agent_steps=5, max_token_velocity=1_000)
+    ctx = restored.restore(det.checkpoint(sid))
+
+    assert ctx.total_tokens == 30
+    assert len(ctx.steps) == 3
+
+    restored.record_step(sid, token_delta=10, signal=LoopSignal.NO_PROGRESS)
+
+    with pytest.raises(LoopDetectedError):
+        restored.record_step(sid, token_delta=10, signal=LoopSignal.NO_PROGRESS)
+
+
+def test_loop_progress_reset_survives_restart() -> None:
+    """W2-2: a PROGRESS signal after restore must reset the trailing NO_PROGRESS streak."""
+    sid = uuid4()
+    det = LoopDetector(max_agent_steps=3, max_token_velocity=1_000)
+    det.create_context(sid, agent_type="finance")
+    det.record_step(sid, token_delta=10, signal=LoopSignal.NO_PROGRESS)
+    det.record_step(sid, token_delta=10, signal=LoopSignal.NO_PROGRESS)
+
+    restored = LoopDetector(max_agent_steps=3, max_token_velocity=1_000)
+    restored.restore(det.checkpoint(sid))
+    restored.record_step(sid, token_delta=5, signal=LoopSignal.PROGRESS)
+    restored.record_step(sid, token_delta=5, signal=LoopSignal.NO_PROGRESS)
+    restored.record_step(sid, token_delta=5, signal=LoopSignal.NO_PROGRESS)
+
+    with pytest.raises(LoopDetectedError):
+        restored.record_step(sid, token_delta=5, signal=LoopSignal.NO_PROGRESS)
+
+

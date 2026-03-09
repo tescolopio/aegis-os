@@ -15,6 +15,27 @@ services:
       - temporal
       - opa
       - prometheus
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+  aegis-worker:
+    build: .
+    command: ["python", "-m", "src.control_plane.worker"]
+    environment:
+      - AEGIS_ENV=development
+      - AEGIS_VAULT_ADDR=http://vault:8200
+      - AEGIS_TEMPORAL_HOST=temporal:7233
+      - AEGIS_TEMPORAL_TASK_QUEUE=aegis-agent-tasks
+      - AEGIS_OPA_URL=http://opa:8181
+      - AEGIS_LLM_PROVIDER=local_llama
+      - AEGIS_LOCAL_LLAMA_BASE_URL=http://host.docker.internal:11434/v1
+      - AEGIS_LOCAL_LLAMA_MODEL=llama3
+    depends_on:
+      - temporal
+      - opa
+      - vault
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
 
   vault:
     image: hashicorp/vault:1.17

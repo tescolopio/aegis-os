@@ -48,6 +48,7 @@ _VALID_PAYLOAD: dict[str, Any] = {
     "model": "gpt-4o-mini",
     "max_tokens": 256,
     "temperature": 0.5,
+    "protect_outbound_request": False,
 }
 
 _STUB_LLM_RESPONSE = LLMResponse(
@@ -137,6 +138,19 @@ class TestDelegation:
         req: OrchestratorRequest = mock_orc.run.call_args.args[0]
         assert req.requester_id == _VALID_PAYLOAD["requester_id"]
 
+    def test_orchestrator_receives_protect_outbound_request_flag(self) -> None:
+        """Router must forward the protect_outbound_request flag unchanged."""
+        mock_orc = _make_mock_orc()
+        client = TestClient(_make_app(mock_orc), raise_server_exceptions=True)
+
+        client.post(
+            "/api/v1/tasks",
+            json={**_VALID_PAYLOAD, "protect_outbound_request": True},
+        )
+
+        req: OrchestratorRequest = mock_orc.run.call_args.args[0]
+        assert req.protect_outbound_request is True
+
     def test_orchestrator_argument_is_orchestrator_request_type(self) -> None:
         """orchestrator.run() must be called with an OrchestratorRequest instance."""
         mock_orc = _make_mock_orc()
@@ -215,7 +229,9 @@ class TestNoDirectGovernanceImports:
 
     def _get_router_import_modules(self) -> set[str]:
         """Return the set of top-level modules imported in router.py (AST-based)."""
-        source = Path(router_module.__file__).read_text()  # type: ignore[arg-type]
+        module_path = router_module.__file__
+        assert module_path is not None
+        source = Path(module_path).read_text()
         tree = ast.parse(source)
         imported: set[str] = set()
         for node in ast.walk(tree):

@@ -1,16 +1,32 @@
 """Tests for the Governance Session Manager."""
 
+from __future__ import annotations
 
 import pytest
 from jose import JWTError, jwt
 
 from src.config import settings
-from src.governance.session_mgr import SessionManager, TokenClaims
+from src.governance.session_mgr import (
+    DPoPReplayError,
+    SessionManager,
+    TokenBindingError,
+    TokenClaims,
+)
 
 
 @pytest.fixture()
 def mgr() -> SessionManager:
     return SessionManager()
+
+
+def _configure_es256(monkeypatch: pytest.MonkeyPatch) -> tuple[str, dict[str, str]]:
+    """Configure ES256 signing settings for sender-constrained token tests."""
+    private_key_pem, public_jwk = SessionManager.generate_dpop_key_pair()
+    public_pem = SessionManager.public_pem_from_jwk(public_jwk)
+    monkeypatch.setattr(settings, "token_algorithm", "ES256")
+    monkeypatch.setattr(settings, "token_private_key", private_key_pem)
+    monkeypatch.setattr(settings, "token_public_key", public_pem)
+    return private_key_pem, public_jwk
 
 
 def test_issue_token_returns_string(mgr: SessionManager) -> None:
@@ -63,3 +79,115 @@ def test_issue_token_raises_on_empty_requester(mgr: SessionManager) -> None:
 def test_invalid_token_raises_error(mgr: SessionManager) -> None:
     with pytest.raises(JWTError):
         mgr.validate_token("this.is.not.a.valid.token")
+
+
+def test_sender_constrained_token_contains_cnf_thumbprint(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    private_key_pem, public_jwk = _configure_es256(monkeypatch)
+    manager = SessionManager()
+    token = manager.issue_sender_constrained_token(
+        agent_type="platform",
+        requester_id="user-900",
+        public_jwk=public_jwk,
+        task_id="task-1",
+    )
+
+    payload = jwt.decode(token, settings.token_public_key, algorithms=["ES256"])
+    assert private_key_pem.startswith("-----BEGIN PRIVATE KEY-----")
+    assert payload["task_id"] == "task-1"
+    assert payload["cnf"]["jkt"] == manager.public_jwk_thumbprint(public_jwk)
+
+
+def test_validate_sender_constrained_token_accepts_matching_dpop_proof(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    private_key_pem, public_jwk = _configure_es256(monkeypatch)
+    manager = SessionManager()
+    token = manager.issue_sender_constrained_token(
+        agent_type="platform",
+        requester_id="user-901",
+        public_jwk=public_jwk,
+        task_id="task-2",
+    )
+    proof = manager.issue_dpop_proof(
+        private_key_pem,
+        public_jwk,
+        http_method="POST",
+        http_url="https://api.example.test/v1/llm",
+        access_token=token,
+    )
+
+    claims = manager.validate_sender_constrained_token(
+        token,
+        proof,
+        http_method="POST",
+        http_url="https://api.example.test/v1/llm",
+    )
+    assert claims.task_id == "task-2"
+    assert claims.cnf is not None
+    assert claims.cnf.jkt == manager.public_jwk_thumbprint(public_jwk)
+
+
+def test_validate_sender_constrained_token_rejects_wrong_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    private_key_pem, public_jwk = _configure_es256(monkeypatch)
+    manager = SessionManager()
+    token = manager.issue_sender_constrained_token(
+        agent_type="platform",
+        requester_id="user-902",
+        public_jwk=public_jwk,
+    )
+
+    attacker_private_key, attacker_public_jwk = SessionManager.generate_dpop_key_pair()
+    attacker_proof = manager.issue_dpop_proof(
+        attacker_private_key,
+        attacker_public_jwk,
+        http_method="GET",
+        http_url="https://api.example.test/v1/llm",
+        access_token=token,
+    )
+
+    assert private_key_pem.startswith("-----BEGIN PRIVATE KEY-----")
+    with pytest.raises(TokenBindingError):
+        manager.validate_sender_constrained_token(
+            token,
+            attacker_proof,
+            http_method="GET",
+            http_url="https://api.example.test/v1/llm",
+        )
+
+
+def test_validate_sender_constrained_token_rejects_replayed_proof(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    private_key_pem, public_jwk = _configure_es256(monkeypatch)
+    manager = SessionManager()
+    token = manager.issue_sender_constrained_token(
+        agent_type="platform",
+        requester_id="user-903",
+        public_jwk=public_jwk,
+    )
+    proof = manager.issue_dpop_proof(
+        private_key_pem,
+        public_jwk,
+        http_method="POST",
+        http_url="https://api.example.test/v1/llm",
+        access_token=token,
+        proof_jti="proof-123",
+    )
+
+    manager.validate_sender_constrained_token(
+        token,
+        proof,
+        http_method="POST",
+        http_url="https://api.example.test/v1/llm",
+    )
+    with pytest.raises(DPoPReplayError):
+        manager.validate_sender_constrained_token(
+            token,
+            proof,
+            http_method="POST",
+            http_url="https://api.example.test/v1/llm",
+        )

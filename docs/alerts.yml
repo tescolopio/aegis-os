@@ -6,14 +6,15 @@
 groups:
   - name: aegis_hitl
     rules:
-      - alert: HITLApprovalStuck
+      - alert: aegis_hitl_stuck
         # Fires when a workflow has been in PendingApproval for more than 24 hours.
-        # The aegis_hitl_stuck_seconds gauge is set by the Watchdog subsystem
-        # (src/watchdog/metrics.py) whenever a workflow enters PendingApproval.
-        expr: aegis_hitl_stuck_seconds > 86400
+        # The aegis_workflow_pending_approval_seconds gauge is set by the
+        # Watchdog subsystem (src/watchdog/metrics.py) whenever a workflow
+        # enters PendingApproval.
+        expr: aegis_workflow_pending_approval_seconds > 86400
         for: 1m
         labels:
-          severity: warning
+          severity: critical
           team: watchdog
         annotations:
           summary: "HITL approval workflow stuck for >24 h"
@@ -23,3 +24,4 @@ groups:
             Temporal UI (http://localhost:18080) and either approve, deny, or
             escalate to an ops_lead.
           runbook: "docs/runbooks/hitl-stuck-approval.md"
+          runbook_url: "docs/runbooks/hitl-stuck-approval.md"

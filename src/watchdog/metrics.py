@@ -74,11 +74,14 @@ orchestrator_errors: Counter = Counter(
 )
 
 # ---------------------------------------------------------------------------
-# HITL stuck-approval gauge (Phase 2 W-prep-3)
+# Pending-approval duration gauge (Phase 2 W2-3)
 # ---------------------------------------------------------------------------
-hitl_stuck_seconds: Gauge = Gauge(
-    "aegis_hitl_stuck_seconds",
+workflow_pending_approval_seconds: Gauge = Gauge(
+    "aegis_workflow_pending_approval_seconds",
     "Seconds a workflow has been in the PendingApproval state. "
     "Alert fires when this exceeds 86400 (24 h).",
     ["workflow_id"],
 )
+
+# Backward-compatible alias for earlier Phase 2 prep references.
+hitl_stuck_seconds: Gauge = workflow_pending_approval_seconds

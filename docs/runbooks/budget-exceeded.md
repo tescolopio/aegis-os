@@ -13,7 +13,7 @@ One or more of the following:
 - Prometheus alert `BudgetCritical` fires: `aegis_budget_remaining_usd < 1.0`
 - Audit log contains a `budget.exceeded` warning event
 - An agent task returns HTTP 400 with body referencing `BudgetExceededError`
-- A Temporal workflow transitions to `HUMAN_INTERVENTION_REQUIRED` state
+- A Temporal workflow transitions to `PendingApproval` / `human_intervention_required`
 
 ---
 
@@ -103,16 +103,52 @@ Budget extensions are governed by `policies/budget.rego`:
 
 Extensions are **not available** for `legal` or `general` agent types.
 
-### Phase 1 (current — manual process)
+### Phase 1 (manual fallback)
 
 1. Confirm with the task owner that the additional spend is authorized.
 2. Record the approval in your ticketing system (include `session_id`, approver, approved amount, justification).
 3. Create a new task request with a higher `budget_limit_usd` in the metadata and issue a fresh session token.
 4. Record an `AuditEvent` with `action: "budget.extension_approved"`, `outcome: "success"`, and the approval metadata.
 
-### Phase 2+ (automated HITL via Temporal)
+### Phase 2 (live HITL via Temporal)
 
-The approval API endpoint (`/api/v1/approvals`) will provide a structured workflow for this process.
+The current implementation pauses the workflow in `PendingApproval` once the
+budget review gate is reached. Approvers act on the task directly:
+
+- `POST /api/v1/tasks/{task_id}/approve`
+- `POST /api/v1/tasks/{task_id}/deny`
+
+Only an admin JIT token with the corresponding `hitl:approve` or `hitl:deny`
+action may resolve the gate.
+
+## HITL Approval Flow
+
+1. Identify the blocked `task_id` from the audit event, alert, or task owner.
+2. Confirm in Temporal UI that the workflow is in `PendingApproval`.
+3. If the spend extension is justified, approve it:
+
+```bash
+curl -s -X POST "http://localhost:18000/api/v1/tasks/${TASK_ID}/approve" \
+    -H "Authorization: Bearer ${ADMIN_JIT_TOKEN}" \
+    -H "Content-Type: application/json" \
+    -d '{"approver_id":"admin-user","reason":"Budget extension approved"}'
+```
+
+4. If the work should be terminated, deny it:
+
+```bash
+curl -s -X POST "http://localhost:18000/api/v1/tasks/${TASK_ID}/deny" \
+    -H "Authorization: Bearer ${ADMIN_JIT_TOKEN}" \
+    -H "Content-Type: application/json" \
+    -d '{"approver_id":"admin-user","reason":"Budget extension denied"}'
+```
+
+5. Re-check Temporal UI and the audit trail to confirm the workflow left
+     `PendingApproval`.
+
+If the request returns `409`, the task exists but is no longer awaiting
+approval and may already be timed out, denied, or completed. A `404` means the
+task could not be resolved at all.
 
 ---
 

@@ -26,7 +26,12 @@ from src.control_plane.orchestrator import BudgetLimitError, Orchestrator, Orche
 from src.governance.guardrails import Guardrails, MaskResult
 from src.governance.policy_engine.opa_client import PolicyEngine, PolicyResult
 from src.governance.session_mgr import SessionManager
-from src.watchdog.budget_enforcer import BudgetEnforcer, BudgetExceededError, BudgetSession
+from src.watchdog.budget_enforcer import (
+    BudgetEnforcer,
+    BudgetExceededError,
+    BudgetHistoryEntry,
+    BudgetSession,
+)
 
 
 @pytest.fixture()
@@ -523,3 +528,54 @@ class TestBudgetSessionSerialization:
         restored.alerts.append("mutation")
 
         assert session.alerts == []
+
+
+def test_budget_serialize_deserialize_round_trip(enforcer: BudgetEnforcer) -> None:
+    """W2-1: serialized sessions preserve exact Decimal spend and idempotency keys."""
+    sid = uuid4()
+    session = enforcer.create_session(
+        sid,
+        agent_type="finance",
+        budget_limit_usd=Decimal("10.00"),
+    )
+    enforcer.record_spend(sid, Decimal("7.34"), operation_id="activity-1")
+
+    restored = BudgetSession.deserialize(session.serialize())
+
+    assert restored.cost_usd == Decimal("7.34")
+    assert restored.budget_limit_usd == Decimal("10.00")
+    assert restored.applied_operation_ids == {"activity-1"}
+
+
+def test_budget_no_double_count_on_redelivery(enforcer: BudgetEnforcer) -> None:
+    """W2-1: replaying the same activity task must not charge spend twice."""
+    sid = uuid4()
+    enforcer.create_session(sid, agent_type="finance", budget_limit_usd=Decimal("10.00"))
+
+    enforcer.record_spend(sid, Decimal("3.00"), operation_id="activity-task-1")
+    session = enforcer.record_spend(sid, Decimal("3.00"), operation_id="activity-task-1")
+
+    assert session.cost_usd == Decimal("3.00")
+    assert session.applied_operation_ids == {"activity-task-1"}
+
+
+def test_budget_exact_recovery_after_restart() -> None:
+    """W2-1: restore_from_history rebuilds the exact recorded spend after replay."""
+    sid = uuid4()
+    enforcer = BudgetEnforcer()
+    history: list[BudgetHistoryEntry] = [
+        {"operation_id": "activity-1", "amount_usd": "1.00", "tokens_used": 500000},
+        {"operation_id": "activity-2", "amount_usd": "2.00", "tokens_used": 1000000},
+        {"operation_id": "activity-2", "amount_usd": "2.00", "tokens_used": 1000000},
+    ]
+
+    restored = enforcer.restore_from_history(
+        session_id=sid,
+        agent_type="finance",
+        budget_limit_usd=Decimal("10.00"),
+        history=history,
+    )
+
+    assert restored.cost_usd == Decimal("3.00")
+    assert restored.tokens_used == 1500000
+    assert restored.applied_operation_ids == {"activity-1", "activity-2"}

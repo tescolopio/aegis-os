@@ -17,7 +17,9 @@ This guide covers production-grade deployment on Kubernetes, production Vault co
 - [TLS Configuration](#tls-configuration)
 - [Secrets Injection](#secrets-injection)
 - [OPA Bundle Configuration](#opa-bundle-configuration)
+- [Temporal Operations](#temporal-operations)
 - [Observability Stack](#observability-stack)
+- [Test Infrastructure](#test-infrastructure)
 - [Health Checks & Readiness](#health-checks--readiness)
 - [Scaling Considerations](#scaling-considerations)
 - [Pre-Deployment Checklist](#pre-deployment-checklist)
@@ -77,11 +79,12 @@ The `docker-compose.yml` is suitable for **local development and CI only**. It u
 
 ### Services
 
-The compose file starts eight services:
+The compose file starts nine services:
 
 | Service | Port(s) | Purpose |
 |---|---|---|
 | `aegis-api` | `18000` | Aegis API server (FastAPI / uvicorn) |
+| `aegis-worker` | internal | Temporal workflow worker for `AgentTaskWorkflow` executions |
 | `vault` | `8210` → `8200` | HashiCorp Vault in dev mode (root token: `aegis-dev-root`) |
 | `temporal` | `7233` (gRPC), `8088` (HTTP) | Temporal workflow server |
 | `temporal-ui` | `18080` | Temporal web UI |
@@ -116,7 +119,24 @@ curl -s http://localhost:8181/v1/policies | python3 -m json.tool | grep '"id"'
 
 ```bash
 docker-compose logs -f aegis-api
+docker-compose logs -f aegis-worker
 ```
+
+### Temporal UI
+
+Use the Temporal UI at `http://localhost:18080` to inspect workflow state,
+signal history, and retry behavior.
+
+### Local worker model
+
+`docker-compose.yml` now starts a dedicated `aegis-worker` service using
+`python -m src.control_plane.worker`. The worker connects to the same Temporal
+server as the API and listens on `AEGIS_TEMPORAL_TASK_QUEUE`.
+
+The default local worker configuration uses the `local_llama` adapter and points
+to `http://host.docker.internal:11434/v1`. If you want to use OpenAI or
+Anthropic instead, set `AEGIS_LLM_PROVIDER` and the matching API-key
+environment variable for the worker service.
 
 To run integration tests against the full stack:
 
@@ -125,6 +145,46 @@ docker-compose up -d
 pytest tests/ -v
 docker-compose down
 ```
+
+---
+
+## Temporal Operations
+
+### Workflow state diagram
+
+```text
+running
+  |
+  | budget or human-review gate triggered
+  v
+pending-approval
+  | approve                      | deny / timeout
+  v                              v
+approved                      denied
+  |                              |
+  v                              v
+completed                     failed
+```
+
+The state names above intentionally match the Phase 2 workflow language used
+in `src/control_plane/scheduler.py` and the HITL runbooks.
+
+### Recovery procedure
+
+1. Identify the affected `task_id` from the alert, audit log, or API caller.
+2. Open Temporal at `http://localhost:18080` and inspect the workflow whose
+   ID matches the `task_id`.
+3. Confirm whether the workflow is `running`, `pending-approval`, `approved`,
+   `denied`, `completed`, or `failed`.
+4. If the worker process died, restart `aegis-worker` before retrying any
+  operator action. Restarting the API alone is not enough to resume workflow
+  execution.
+5. If the workflow is `pending-approval`, use the documented
+   `POST /api/v1/tasks/{task_id}/approve` or
+   `POST /api/v1/tasks/{task_id}/deny` endpoint with a valid admin JIT token.
+6. Re-open Temporal and confirm the workflow moved out of `pending-approval`.
+7. Verify the related audit events (`workflow.pending_approval`,
+   `workflow.approved`, `workflow.denied`, or `workflow.timed_out`) were emitted.
 
 ---
 
@@ -154,7 +214,7 @@ data:
   AEGIS_MAX_TOKEN_VELOCITY: "10000"
   AEGIS_BUDGET_LIMIT_USD: "10.0"
   AEGIS_TOKEN_EXPIRY_SECONDS: "900"
-  AEGIS_TOKEN_ALGORITHM: "HS256"
+  AEGIS_TOKEN_ALGORITHM: "ES256"
 ```
 
 ### Secret — Sensitive Values
@@ -170,8 +230,18 @@ metadata:
   namespace: aegis-system
 type: Opaque
 stringData:
-  AEGIS_TOKEN_SECRET_KEY: "<generate with: python -c 'import secrets; print(secrets.token_hex(32))'>"
+  AEGIS_TOKEN_PRIVATE_KEY: |-
+    -----BEGIN PRIVATE KEY-----
+    <vault-managed es256 private key>
+    -----END PRIVATE KEY-----
+  AEGIS_TOKEN_PUBLIC_KEY: |-
+    -----BEGIN PUBLIC KEY-----
+    <vault-managed es256 public key>
+    -----END PUBLIC KEY-----
   AEGIS_VAULT_TOKEN: "<scoped vault token — not root>"
+
+# Optional legacy compatibility only during phased rollback:
+#  AEGIS_TOKEN_SECRET_KEY: "<temporary hs256 fallback secret>"
 ```
 
 ### Deployment
@@ -344,9 +414,14 @@ vault write -f auth/approle/role/aegis-api/secret-id
 vault secrets enable -path=secret kv-v2
 
 vault kv put secret/aegis/api \
-  token_secret_key="$(python -c 'import secrets; print(secrets.token_hex(32))')" \
+  token_private_key_pem="$(cat ./jwt-es256-private.pem)" \
+  token_public_key_pem="$(cat ./jwt-es256-public.pem)" \
   openai_api_key="sk-..." \
   anthropic_api_key="sk-ant-..."
+
+# Only during a controlled migration window, keep a legacy fallback secret:
+# vault kv patch secret/aegis/api \
+#   token_secret_key="$(python -c 'import secrets; print(secrets.token_hex(32))')"
 ```
 
 ---
@@ -413,10 +488,16 @@ spec:
   target:
     name: aegis-secrets
   data:
-    - secretKey: AEGIS_TOKEN_SECRET_KEY
+    - secretKey: AEGIS_TOKEN_PRIVATE_KEY
       remoteRef:
         key: secret/aegis/api
-        property: token_secret_key
+        property: token_private_key_pem
+    - secretKey: AEGIS_TOKEN_PUBLIC_KEY
+      remoteRef:
+        key: secret/aegis/api
+        property: token_public_key_pem
+
+# Add AEGIS_TOKEN_SECRET_KEY only if legacy HS256 compatibility is intentionally enabled.
 ```
 
 ### Option B: Vault Agent Injector
@@ -511,6 +592,53 @@ groups:
           severity: critical
         annotations:
           summary: "OPA evaluation errors — policy enforcement may be degraded"
+
+The Phase 2 HITL alert rule currently lives in `docs/alerts.yml` and is loaded
+via `rule_files` from `docs/prometheus.yml`. It targets
+`aegis_workflow_pending_approval_seconds` and links to
+`docs/runbooks/hitl-stuck-approval.md`.
+
+For demo-safe redeploys after changing workflow, API, or Prometheus rule code,
+rebuild and restart only the affected services:
+
+```bash
+docker-compose up -d --build aegis-api aegis-worker prometheus
+curl -s http://localhost:18000/metrics | grep aegis_workflow_pending_approval_seconds
+curl -s http://localhost:19090/api/v1/rules | jq '.data.groups[] | select(.name == "aegis_hitl")'
+```
+
+The first command refreshes the scraped API process, the Temporal worker, and
+the Prometheus rule loader together so demos do not end up with stale worker
+code or stale alert definitions.
+
+To verify the full PendingApproval metric lifecycle against the live dev stack
+without depending on a live LLM provider, run the repo-owned demo helper from
+the `aegis` environment:
+
+```bash
+conda activate aegis
+python scripts/verify_pending_approval_demo.py --action deny
+```
+
+The script starts a real workflow, waits until `/metrics` exposes
+`aegis_workflow_pending_approval_seconds`, sends a deny signal through the API,
+and confirms the metric is cleared again.
+
+---
+
+## Test Infrastructure
+
+Phase 2 workflow and HITL validation in this repository currently depends on:
+
+- `testcontainers` for ephemeral OPA and Temporal-adjacent integration tests
+- local Docker for the dev stack
+- the `aegis-worker` Temporal worker service in Docker Compose for runtime
+  workflow execution outside tests
+- Prometheus loading `docs/alerts.yml` through `docs/prometheus.yml`
+
+`toxiproxy` (or an equivalent network fault injector) is still a remaining Gate 2
+infrastructure item. Do not mark the outage-recovery audit criteria complete
+until it is available in CI and documented here.
 ```
 
 ---
@@ -543,7 +671,8 @@ A **deep health check** (verifying OPA reachability and Vault connectivity) is p
 Complete every item before routing production traffic to a new Aegis-OS deployment.
 
 ### Secrets & Identity
-- [ ] `AEGIS_TOKEN_SECRET_KEY` is a 256-bit random value stored in Vault, not an environment variable
+- [ ] `AEGIS_TOKEN_PRIVATE_KEY` and `AEGIS_TOKEN_PUBLIC_KEY` are sourced from Vault-managed signing material
+- [ ] `AEGIS_TOKEN_SECRET_KEY` is unset unless legacy HS256 bearer compatibility is intentionally enabled for migration
 - [ ] Vault is initialized in production mode (not `-dev`); unseal keys are distributed across key holders
 - [ ] Aegis uses an AppRole with a scoped policy — never the Vault root token
 - [ ] All LLM provider API keys are stored in Vault KV, not env vars

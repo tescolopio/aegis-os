@@ -18,6 +18,8 @@ agent_permissions := {
 # Derive the set of registered agent types from the permissions map.
 registered_agent_types := {k | agent_permissions[k]}
 
+registered_roles := {"admin", "operator", "viewer", "auditor"}
+
 # Sensitive agent types that require additional PII scrubbing on every LLM call.
 sensitive_agent_types := {"finance", "hr", "legal"}
 
@@ -57,7 +59,26 @@ allow if {
 # Orchestrator action instruction
 # ---------------------------------------------------------------------------
 
-# Default: reject (fires when allow = false, i.e. no allow rule matched).\n\n# ---------------------------------------------------------------------------\n# Phase 2 preparation: HITL approval RBAC (S-prep-2)\n# ---------------------------------------------------------------------------\n\n# Registered RBAC roles and the workflow actions each role may perform.\n# Only principals whose role appears in this map may approve or deny a\n# pending-approval workflow.  Unrecognised roles are implicitly denied.\nrbac_capabilities := {\n    \"ops_lead\":       [\"approve\", \"deny\", \"view\"],\n    \"ops_member\":     [\"view\"],\n    \"service_account\": [],\n}\n\n# Allow approve or deny on a pending-approval workflow when the calling\n# principal holds the required RBAC capability.\n# input.principal_role must be one of the registered roles above;\n# input.action must be \"approve\" or \"deny\";\n# input.resource must be \"workflow:pending_approval\".\nallow if {\n    not input.token_expired\n    input.action in rbac_capabilities[input.principal_role]\n    input.resource == \"workflow:pending_approval\"\n}
+# Default: reject (fires when allow = false, i.e. no allow rule matched).
+
+# ---------------------------------------------------------------------------
+# Phase 2: HITL approval RBAC
+# ---------------------------------------------------------------------------
+
+rbac_capabilities := {
+    "admin": ["approve", "deny", "view"],
+    "operator": ["view"],
+    "viewer": ["view"],
+    "auditor": ["view"],
+}
+
+allow if {
+    not input.token_expired
+    input.resource == "workflow:pending_approval"
+    input.principal_role in registered_roles
+    input.action in rbac_capabilities[input.principal_role]
+}
+
 default action := "reject"
 
 # Permitted AND sensitive agent type → instruct orchestrator to re-mask.
@@ -85,17 +106,26 @@ reasons contains "token_expired" if {
     input.token_expired == true
 }
 
+reasons contains "rbac_denied" if {
+    input.resource == "workflow:pending_approval"
+    not input.token_expired
+    not input.action in rbac_capabilities[input.principal_role]
+}
+
 reasons contains "agent_type_not_permitted" if {
+    input.resource != "workflow:pending_approval"
     not input.agent_type in registered_agent_types
 }
 
 reasons contains "pii_masking_required" if {
+    input.resource != "workflow:pending_approval"
     input.action != "llm.complete"
     input.agent_type in sensitive_agent_types
     not input.metadata.sensitive_masking == "enabled"
 }
 
 reasons contains "resource_not_permitted" if {
+    input.resource != "workflow:pending_approval"
     input.action != "llm.complete"
     perms := agent_permissions[input.agent_type]
     not input.resource in perms[input.action]

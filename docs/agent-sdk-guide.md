@@ -95,11 +95,13 @@ Content-Type: application/json
 
 ## Using the Session Token
 
-The `session_token` is a signed JWT. It must be included as a Bearer token in the `Authorization` header on every subsequent request within the session:
+The `session_token` is a signed JWT. Use it as a Bearer token when calling Aegis API routes, and treat it as sender-constrained identity for any protected downstream flow that also requires a DPoP proof:
 
 ```http
 Authorization: Bearer <session_token>
 ```
+
+When Aegis or an integration uses the token against a DPoP-protected flow, include a matching `DPoP` header with a proof whose JWK thumbprint matches the token's `cnf.jkt` claim. Legacy bearer-only flows may still exist during migration, but new integrations should assume `ES256` plus DPoP is the default contract.
 
 The token encodes:
 
@@ -123,6 +125,11 @@ Tokens expire after 15 minutes. For tasks that require more time, your agent sho
 1. **Track the expiry** — decode the JWT locally to read the `exp` claim (no signature verification needed just to read claims).
 2. **Renew proactively** — submit a new `/api/v1/tasks` request with the same `requester_id` and `agent_type` before the token expires. Use the same `task_id` in metadata to maintain audit continuity.
 3. **Handle 401 gracefully** — if the token expires mid-task, you will receive an OPA `reasons: ["token_expired"]` response. Re-submit to get a fresh token and continue.
+
+For protected downstream calls, Temporal retries rotate the access-token `jti`
+and DPoP proof `jti` on every attempt while preserving the original `cnf.jkt`
+sender binding. Treat every retry as a fresh credential set even when the bound
+public key thumbprint remains stable.
 
 ```python
 import time
@@ -301,7 +308,7 @@ Code Scalpel is a surgical code analysis MCP server — 23 deterministic tools b
 |---|---|---|---|
 | Code analysis accuracy | AST + PDG + Z3 theorem prover | — | Deterministic, provable analysis |
 | Access control | — | OPA policies per `agent_type` | Who can scan which repositories |
-| Identity | — | JIT tokens (HS256, 15-min TTL, unique `jti`) | Scoped, short-lived sessions |
+| Identity | — | JIT tokens (ES256 + DPoP, 15-min TTL, unique `jti`; legacy bearer fallback only during migration) | Scoped, short-lived sessions |
 | Cost control | — | `BudgetEnforcer` (Decimal precision) | Hard spend cap per analysis task |
 | Audit trail | `.code-scalpel/audit.jsonl` (local) | Aegis audit vault (immutable) | SOC2/ISO 27001-defensible log |
 | PII scrubbing | — | `Guardrails` pre- and post-LLM | File paths, usernames, and IPs redacted |
@@ -345,7 +352,7 @@ Code Scalpel tool invocation (extract_code / security_scan / symbolic_execute / 
   ↓
 1. pre-PII scrub   — Guardrails strips file paths and user data from the prompt
 2. policy-eval     — OPA: code_scalpel + llm.complete → allow
-3. jit-token-issue — SessionManager issues HS256 JIT token (15-min TTL, unique jti)
+3. jit-token-issue — SessionManager issues sender-constrained ES256 JIT token (15-min TTL, unique jti) and binds protected flows to DPoP proof material
 4. llm-invoke      — Code Scalpel MCP server executes the deterministic tool call
 5. post-sanitize   — Guardrails strips any PII surfaced in tool output
   ↓

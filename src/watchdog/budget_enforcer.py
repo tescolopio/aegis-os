@@ -48,6 +48,15 @@ class BudgetSessionSnapshot(TypedDict):
     tokens_used: int
     cost_usd: str
     alerts: list[str]
+    applied_operation_ids: list[str]
+
+
+class BudgetHistoryEntry(TypedDict):
+    """Replayable budget ledger entry for restart-safe reconstruction."""
+
+    operation_id: str
+    amount_usd: str
+    tokens_used: int
 
 
 @dataclass
@@ -60,6 +69,7 @@ class BudgetSession:
     tokens_used: int = 0
     cost_usd: Decimal = field(default_factory=lambda: Decimal("0"))
     alerts: list[str] = field(default_factory=list)
+    applied_operation_ids: set[str] = field(default_factory=set)
 
     def serialize(self) -> BudgetSessionSnapshot:
         """Serialize this session to a snapshot dict for Temporal state persistence.
@@ -75,6 +85,7 @@ class BudgetSession:
             tokens_used=self.tokens_used,
             cost_usd=str(self.cost_usd),
             alerts=list(self.alerts),
+            applied_operation_ids=sorted(self.applied_operation_ids),
         )
 
     @classmethod
@@ -91,6 +102,7 @@ class BudgetSession:
             tokens_used=snapshot["tokens_used"],
             cost_usd=Decimal(snapshot["cost_usd"]),
             alerts=list(snapshot["alerts"]),
+            applied_operation_ids=set(snapshot.get("applied_operation_ids", [])),
         )
 
 
@@ -178,6 +190,8 @@ class BudgetEnforcer:
         self,
         session_id: UUID,
         amount_usd: Decimal,
+        *,
+        operation_id: str | None = None,
     ) -> BudgetSession:
         """Record a USD spend amount and raise :exc:`BudgetExceededError` synchronously.
 
@@ -201,7 +215,11 @@ class BudgetEnforcer:
             If no session with *session_id* exists.
         """
         session = self._get_session(session_id)
+        if self._is_duplicate_operation(session, operation_id):
+            return session
+
         session.cost_usd += amount_usd
+        self._mark_operation(session, operation_id)
 
         remaining = session.budget_limit_usd - session.cost_usd
         _budget_remaining.labels(session_id=str(session_id)).set(
@@ -260,6 +278,8 @@ class BudgetEnforcer:
         session_id: UUID,
         tokens: int,
         cost_per_token: Decimal = DEFAULT_COST_PER_TOKEN,
+        *,
+        operation_id: str | None = None,
     ) -> BudgetSession:
         """Record token usage and convert to USD spend via ``cost_per_token``.
 
@@ -285,10 +305,54 @@ class BudgetEnforcer:
             If no session with *session_id* exists.
         """
         session = self._get_session(session_id)
+        if self._is_duplicate_operation(session, operation_id):
+            return session
+
         session.tokens_used += tokens
         _tokens_consumed.labels(agent_type=session.agent_type).inc(tokens)
         amount_usd = Decimal(tokens) * cost_per_token
-        return self.record_spend(session_id, amount_usd)
+        return self.record_spend(session_id, amount_usd, operation_id=operation_id)
+
+    def restore_session(self, snapshot: BudgetSessionSnapshot) -> BudgetSession:
+        """Restore a serialized session snapshot into the live enforcer registry."""
+        session = BudgetSession.deserialize(snapshot)
+        self._sessions[session.session_id] = session
+        remaining = session.budget_limit_usd - session.cost_usd
+        _budget_remaining.labels(session_id=str(session.session_id)).set(
+            float(max(remaining, Decimal("0")))
+        )
+        return session
+
+    def restore_from_history(
+        self,
+        *,
+        session_id: UUID,
+        agent_type: str,
+        budget_limit_usd: Decimal,
+        history: list[BudgetHistoryEntry],
+    ) -> BudgetSession:
+        """Rebuild a budget session by replaying idempotent ledger entries.
+
+        Duplicate ``operation_id`` values are ignored so callers can safely
+        replay at-least-once delivery histories without double-counting spend.
+        """
+        session = BudgetSession(
+            session_id=session_id,
+            agent_type=agent_type,
+            budget_limit_usd=budget_limit_usd,
+        )
+        self._sessions[session_id] = session
+        _budget_remaining.labels(session_id=str(session_id)).set(float(budget_limit_usd))
+
+        for entry in history:
+            self.record_tokens(
+                session_id,
+                tokens=entry["tokens_used"],
+                cost_per_token=self._resolve_cost_per_token(entry),
+                operation_id=entry["operation_id"],
+            )
+
+        return session
 
     def get_session(self, session_id: UUID) -> BudgetSession | None:
         """Return the budget session for the given ID, or ``None`` if not found."""
@@ -304,3 +368,22 @@ class BudgetEnforcer:
         if session is None:
             raise KeyError(f"Budget session {session_id} not found")
         return session
+
+    @staticmethod
+    def _is_duplicate_operation(session: BudgetSession, operation_id: str | None) -> bool:
+        """Return ``True`` when an at-least-once redelivery was already applied."""
+        return operation_id is not None and operation_id in session.applied_operation_ids
+
+    @staticmethod
+    def _mark_operation(session: BudgetSession, operation_id: str | None) -> None:
+        """Persist an applied idempotency key on the session snapshot."""
+        if operation_id is not None:
+            session.applied_operation_ids.add(operation_id)
+
+    @staticmethod
+    def _resolve_cost_per_token(entry: BudgetHistoryEntry) -> Decimal:
+        """Derive the exact per-token cost recorded in a history entry."""
+        tokens_used = entry["tokens_used"]
+        if tokens_used == 0:
+            return Decimal("0")
+        return Decimal(entry["amount_usd"]) / Decimal(tokens_used)

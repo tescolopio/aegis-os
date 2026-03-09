@@ -31,7 +31,7 @@ from contextlib import contextmanager
 from decimal import Decimal
 from uuid import UUID, uuid4
 
-from jose.exceptions import ExpiredSignatureError as JoseExpiredSignatureError
+from jose import JWTError
 from opentelemetry import trace
 from opentelemetry.trace import Status, StatusCode
 from pydantic import BaseModel, Field
@@ -40,7 +40,12 @@ from src.adapters.base import BaseAdapter, LLMRequest, LLMResponse
 from src.audit_vault.logger import AuditLogger
 from src.governance.guardrails import Guardrails
 from src.governance.policy_engine.opa_client import OpaUnavailableError, PolicyEngine, PolicyInput
-from src.governance.session_mgr import SessionManager, TokenExpiredError, TokenScopeError
+from src.governance.session_mgr import (
+    SessionManager,
+    TokenExpiredError,
+    TokenRevokedError,
+    TokenScopeError,
+)
 from src.watchdog.budget_enforcer import BudgetEnforcer, BudgetExceededError
 from src.watchdog.loop_detector import (
     LoopDetectedError,
@@ -75,6 +80,7 @@ class OrchestratorRequest(BaseModel):
     temperature: float = 0.7
     system_prompt: str = ""
     metadata: dict[str, str] = Field(default_factory=dict)
+    protect_outbound_request: bool = False
     # ------------------------------------------------------------------
     # Watchdog budget-enforcement fields
     # ------------------------------------------------------------------
@@ -192,6 +198,7 @@ def _stage_error_guard(stage: str, agent_type: str) -> Generator[None, None, Non
 _CONTROLLED_EXC: tuple[type[Exception], ...] = (
     PolicyDeniedError,
     TokenExpiredError,
+    TokenRevokedError,
     TokenScopeError,
     BudgetLimitError,
     LoopHaltError,
@@ -454,11 +461,11 @@ class Orchestrator:
                 str(task_id),
                 audit=self._audit,
             ):
+                adapter_token: str
                 if request.session_token:
-                    # Decode – jose raises ExpiredSignatureError for stale tokens.
                     try:
                         claims = self._session_mgr.validate_token(request.session_token)
-                    except JoseExpiredSignatureError as exc:
+                    except TokenExpiredError as exc:
                         self._audit.stage_event(
                             "token.expired",
                             outcome="deny",
@@ -470,6 +477,18 @@ class Orchestrator:
                         raise TokenExpiredError(
                             "Session token has expired"
                         ) from exc
+                    except TokenRevokedError as exc:
+                        self._audit.stage_event(
+                            "token.revoked",
+                            outcome="deny",
+                            stage="jit-token-issue",
+                            task_id=str(task_id),
+                            agent_type=request.agent_type,
+                            requester_id=request.requester_id,
+                        )
+                        raise PermissionError("Session token has been revoked") from exc
+                    except JWTError:
+                        raise
 
                     # Belt-and-suspenders: check independently of jose (covers
                     # sub-second clock skew and test-injected fake claims).
@@ -500,6 +519,7 @@ class Orchestrator:
                             f"but request declares agent_type={request.agent_type!r}"
                         )
                     token = request.session_token
+                    adapter_token = token
                     self._audit.stage_event(
                         "token.validated",
                         outcome="allow",
@@ -512,7 +532,9 @@ class Orchestrator:
                         agent_type=request.agent_type,
                         requester_id=request.requester_id,
                         metadata=request.metadata,
+                        task_id=str(task_id),
                     )
+                    adapter_token = token
                     # Decode the freshly-issued token to extract the jti for
                     # the immutable audit trail.
                     issued_claims = self._session_mgr.validate_token(token)
@@ -523,6 +545,51 @@ class Orchestrator:
                         task_id=str(task_id),
                         agent_type=request.agent_type,
                         jti=issued_claims.jti,
+                        requester_id=request.requester_id,
+                    )
+
+                dpop_proof: str | None = None
+                if request.protect_outbound_request:
+                    preview_req = LLMRequest(
+                        prompt=sanitized_prompt,
+                        model=request.model,
+                        max_tokens=request.max_tokens,
+                        temperature=request.temperature,
+                        system_prompt=request.system_prompt,
+                        metadata={"aegis_token": token},
+                    )
+                    binding = self._adapter.outbound_request_binding(preview_req)
+                    if binding is None:
+                        raise ValueError(
+                            f"Adapter {self._adapter.provider_name!r} does not expose an outbound "
+                            "request binding for protected flows"
+                        )
+                    http_method, http_url = binding
+                    private_key_pem, public_jwk = self._session_mgr.generate_dpop_key_pair()
+                    adapter_token = self._session_mgr.issue_sender_constrained_token(
+                        agent_type=request.agent_type,
+                        requester_id=request.requester_id,
+                        public_jwk=public_jwk,
+                        metadata=request.metadata,
+                        task_id=str(task_id),
+                        allowed_actions=["llm.invoke"],
+                        rotation_key=f"adapter:{task_id}",
+                    )
+                    dpop_proof = self._session_mgr.issue_dpop_proof(
+                        private_key_pem,
+                        public_jwk,
+                        http_method=http_method,
+                        http_url=http_url,
+                        access_token=adapter_token,
+                    )
+                    adapter_claims = self._session_mgr.validate_token(adapter_token)
+                    self._audit.stage_event(
+                        "token.sender_constrained_issued",
+                        outcome="allow",
+                        stage="jit-token-issue",
+                        task_id=str(task_id),
+                        agent_type=request.agent_type,
+                        jti=adapter_claims.jti,
                         requester_id=request.requester_id,
                     )
 
@@ -584,7 +651,17 @@ class Orchestrator:
                     max_tokens=request.max_tokens,
                     temperature=request.temperature,
                     system_prompt=request.system_prompt,
-                    metadata={"aegis_token": token},
+                    metadata={
+                        "aegis_token": adapter_token,
+                        **(
+                            {
+                                "aegis_dpop_proof": dpop_proof,
+                                "aegis_protected": "true",
+                            }
+                            if dpop_proof is not None
+                            else {}
+                        ),
+                    },
                 )
                 llm_response: LLMResponse = await self._adapter.complete(llm_req)
                 self._audit.stage_event(

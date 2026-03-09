@@ -15,8 +15,27 @@
 """Base adapter interface for LLM provider integrations."""
 
 from abc import ABC, abstractmethod
+from collections.abc import Mapping
 
 from pydantic import BaseModel, Field
+
+from src.config import settings
+from src.governance.session_mgr import (
+    DPoPReplayError,
+    DPoPProofError,
+    SessionManager,
+    TokenClaims,
+    TokenBindingError,
+)
+
+AegisMetadata = Mapping[str, str]
+AegisTokenKey = "aegis_token"
+AegisProofKey = "aegis_dpop_proof"
+AegisProtectedKey = "aegis_protected"
+
+
+class AdapterSecurityError(PermissionError):
+    """Raised when an outbound adapter call lacks required sender constraints."""
 
 
 class LLMRequest(BaseModel):
@@ -46,6 +65,10 @@ class LLMResponse(BaseModel):
 class BaseAdapter(ABC):
     """Abstract base class for all LLM provider adapters."""
 
+    def outbound_request_binding(self, request: LLMRequest) -> tuple[str, str] | None:
+        """Return ``(method, url)`` for the protected outbound request, if known."""
+        return None
+
     @property
     @abstractmethod
     def provider_name(self) -> str:
@@ -54,3 +77,38 @@ class BaseAdapter(ABC):
     @abstractmethod
     async def complete(self, request: LLMRequest) -> LLMResponse:
         """Send a completion request to the LLM provider."""
+
+
+def require_sender_constrained_request(
+    request: LLMRequest,
+    *,
+    session_mgr: SessionManager,
+    http_method: str,
+    http_url: str,
+) -> TokenClaims | None:
+    """Validate sender-constrained metadata before an adapter performs I/O."""
+    metadata = request.metadata
+    protected = (
+        metadata.get(AegisProtectedKey) == "true"
+        or settings.require_sender_constrained_tokens
+    )
+    if not protected:
+        return None
+
+    token = metadata.get(AegisTokenKey)
+    proof = metadata.get(AegisProofKey)
+    if not token or not proof:
+        raise AdapterSecurityError(
+            "Protected outbound LLM requests must include both aegis_token and "
+            "aegis_dpop_proof metadata"
+        )
+
+    try:
+        return session_mgr.validate_sender_constrained_token(
+            token,
+            proof,
+            http_method=http_method,
+            http_url=http_url,
+        )
+    except (DPoPReplayError, DPoPProofError, TokenBindingError) as exc:
+        raise AdapterSecurityError(str(exc)) from exc

@@ -138,11 +138,11 @@ Caller  +  AuditVault
 
 | Threat | Category | Description | Mitigation |
 |---|---|---|---|
-| Weak signing key in development | **S**poofing | Default `token_secret_key = "change-me-in-production"` is publicly known | Production deployment MUST rotate this; enforced via `SECURITY.md` checklist and startup assertion |
+| Weak signing material in development | **S**poofing | Development-mode fallback key material is predictable or checked into local env files | Production deployment MUST use Vault-managed `ES256` signing keys; legacy `HS256` fallback must stay disabled outside controlled migration windows |
 | JWT algorithm confusion (`alg: none`) | **S**poofing | Attacker strips algorithm header to bypass signature verification | `python-jose` `jwt.decode()` specifies `algorithms=[settings.token_algorithm]` explicitly, rejecting `none` |
-| Token replay after expiry | **E**levation of Privilege | Stolen token used within its 15-minute window | Scope restriction means a replayed `finance` token cannot access `hr` resources; add token blacklist (Vault KV) for critical revocations |
-| `jti` claim not checked for uniqueness | **R**epudiation | Same `jti` used twice; log correlation fails | Implement `jti` seen-set in Vault KV at validation time to detect reuse |
-| Secret key in environment variable | **I**nformation Disclosure | `AEGIS_TOKEN_SECRET_KEY` exposed in `docker inspect` or process environment | Phase 4: fetch key dynamically from Vault Transit Secrets Engine; never store in env |
+| Token or proof replay within TTL | **E**levation of Privilege | Stolen token or duplicated DPoP proof is replayed within its 15-minute window | Scope restriction limits blast radius, `cnf.jkt` binds protected flows to proof material, and replay detection must reject reused proof or token identifiers |
+| `jti` claim not checked for uniqueness | **R**epudiation | Same `jti` used twice; log correlation fails | Persist replay-detection state and reject reused token or DPoP proof identifiers |
+| Private signing key in environment variable | **I**nformation Disclosure | `AEGIS_TOKEN_PRIVATE_KEY` or legacy `AEGIS_TOKEN_SECRET_KEY` is exposed in `docker inspect` or process environment | Phase 4: fetch signing material dynamically from Vault Transit Secrets Engine; never store long-lived signing secrets in env |
 
 ---
 

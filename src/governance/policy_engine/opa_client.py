@@ -28,6 +28,8 @@ class PolicyInput(BaseModel):
     action: str
     resource: str
     metadata: dict[str, str] = {}
+    principal_role: str | None = None
+    token_expired: bool = False
 
 
 class PolicyResult(BaseModel):

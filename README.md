@@ -47,10 +47,11 @@ Traditional long-lived API keys are a critical liability. Aegis-OS issues **Just
 
 - Expires after **15 minutes** (configurable via `AEGIS_TOKEN_EXPIRY_SECONDS`)
 - Is scoped to a specific **agent type** (`finance`, `hr`, `it`, `legal`, `general`)
-- Is signed with HS256 and carries a unique `jti` claim for revocation tracing
+- Uses asymmetric signing for protected flows and carries a unique `jti` claim for revocation tracing
+- Can be sender-constrained with ES256 + DPoP so replayed or stolen tokens are unusable without the agent's proof key
 - Drastically reduces the blast radius if a token is ever compromised
 
-Tokens are issued by `SessionManager` and validated on every inbound request.
+Tokens are issued by `SessionManager` and validated on every inbound request. During phased rollout, Aegis-OS can accept legacy bearer-style tokens while preferring DPoP-bound sender-constrained tokens for protected flows.
 
 ### 2. The Aegis Governance Loop
 
@@ -244,7 +245,7 @@ Competitors are building *features*. Aegis-OS is building an **open standard** â
 | Structured Logging | structlog 24.4 |
 | Distributed Tracing | OpenTelemetry (OTLP) |
 | Metrics | Prometheus + Grafana |
-| Token Signing | python-jose (HS256) |
+| Token Signing | python-jose + cryptography (ES256 + DPoP, legacy bearer compatibility during rollout) |
 | Settings | pydantic-settings (env-prefixed) |
 | Runtime | Python 3.11+ |
 
@@ -347,7 +348,7 @@ Route an agent task through the Aegis Governance Loop and receive a scoped JIT s
 }
 ```
 
-The returned `session_token` is a HS256-signed JWT with a 15-minute expiry, scoped to the requested agent type.
+The returned `session_token` is a short-lived scoped JWT. For protected outbound flows, Aegis-OS issues a sender-constrained ES256 token bound to the caller's proof key via `cnf.jkt`, and the caller must present a DPoP proof per request. Legacy bearer-compatible tokens remain available only to support phased migration.
 
 ### `GET /api/v1/tasks/{task_id}`
 
@@ -367,12 +368,14 @@ All settings are loaded from environment variables prefixed with `AEGIS_` and ca
 | `AEGIS_TEMPORAL_HOST` | `localhost:7233` | Temporal gRPC host |
 | `AEGIS_OPA_URL` | `http://localhost:8181` | OPA server base URL |
 | `AEGIS_TOKEN_EXPIRY_SECONDS` | `900` | JIT token lifetime (15 min) |
-| `AEGIS_TOKEN_SECRET_KEY` | *(change in prod)* | HS256 signing key |
+| `AEGIS_TOKEN_SECRET_KEY` | *(legacy only)* | Legacy bearer-token secret during migration rollout |
+| `AEGIS_TOKEN_PRIVATE_KEY` | *(set in prod)* | ES256 private key for sender-constrained token issuance |
+| `AEGIS_TOKEN_PUBLIC_KEY` | *(set in prod)* | ES256 public key used for validation and downstream verification |
 | `AEGIS_MAX_AGENT_STEPS` | `10` | Circuit breaker step threshold |
 | `AEGIS_MAX_TOKEN_VELOCITY` | `10000` | Max tokens per single step |
 | `AEGIS_BUDGET_LIMIT_USD` | `10.0` | Default per-session USD cap |
 
-> **Security note:** `AEGIS_TOKEN_SECRET_KEY` and `AEGIS_VAULT_TOKEN` must be replaced with strong secrets before any production deployment. Use HashiCorp Vault or your platform's secrets manager.
+> **Security note:** `AEGIS_TOKEN_PRIVATE_KEY`, `AEGIS_TOKEN_PUBLIC_KEY`, and `AEGIS_VAULT_TOKEN` must be provisioned through a secure secret-management path before production deployment. `AEGIS_TOKEN_SECRET_KEY` is retained only as a temporary migration fallback and should be removed after bearer compatibility is retired.
 
 ---
 

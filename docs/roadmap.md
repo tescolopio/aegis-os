@@ -2004,15 +2004,21 @@ All of the following must be complete before the tag is cut.
 
 ---
 
-#### Next Steps by Team — Phase 3 Preparation
+#### Next Steps by Team — Phase 3 Kickoff
 
-Gate 2 passes and the `v0.4.0` tag is cut. Each team's first actions entering
-Phase 3 are listed below. These are not Phase 3 deliverables — they are the
-**setup actions** that unlock parallel Phase 3 work.
+Gate 2 passed, `v0.4.0` was tagged and published on 2026-03-10, and the items
+below are the first planned actions entering Phase 3. These are not the full
+Phase 3 deliverables — they are the **kickoff actions** that unlock parallel
+Phase 3 work.
+
+No Phase 3 kickoff task may merge placeholder production code to `main`.
+Contract docs, failing tests, and design records may land first, but router,
+workflow, and compliance code under `src/` must ship with real behavior in the
+same PR rather than `NotImplementedError`, `501`, or stub-only handlers.
 
 **Platform**
-1. Scaffold `GET /api/v1/tasks/{task_id}/trace` endpoint in `src/control_plane/router.py` with a stub body raising `NotImplementedError`; create `tests/test_trace_endpoint.py` with a single failing test asserting the route exists — this becomes the Phase 3 test harness anchor
-2. Scaffold `GET /api/v1/sessions/{session_id}/budget` endpoint stub with a paired failing test; both endpoints must have OPA `trace:read` and `budget:read` capability constants added to `policies/agent_access.rego` before any implementation
+1. Lock the API contracts for `GET /api/v1/tasks/{task_id}/trace` and `GET /api/v1/sessions/{session_id}/budget` in `docs/api-reference.md`, and add the OPA `trace:read` and `budget:read` capability constants to `policies/agent_access.rego` before router or handler code lands on `main`
+2. Create `tests/test_trace_endpoint.py` and the paired budget-read endpoint tests as the first implementation harnesses, but merge them only alongside the first real endpoint implementations — not as stub-only production routes
 3. Document the p99 < 200 ms latency SLA for the trace endpoint in `docs/api-reference.md` as a non-negotiable requirement; run a baseline `GET /trace` on a 10-event task and record the current latency as the Phase 3 starting benchmark
 
 **Security & Governance**
@@ -2027,7 +2033,7 @@ Phase 3 are listed below. These are not Phase 3 deliverables — they are the
 
 **Audit & Compliance**
 1. Produce the write-once backend decision record in `docs/architecture_decisions.md`: QLDB vs. cryptographically signed Postgres; include PoC results for both options; the decision must be reviewed and signed off before any Phase 3 implementation begins — no backend code before sign-off
-2. Define the `ComplianceReporter` interface in `src/audit_vault/compliance.py` as a type stub with documented method signatures for `generate_soc2_report(window_start, window_end)` and `generate_gdpr_report(window_start, window_end)` — stubs raise `NotImplementedError`; the interface is frozen and other teams may depend on it
+2. Freeze the `ComplianceReporter` contract in documentation and tests before implementation begins; when `src/audit_vault/compliance.py` lands on `main`, it must ship with real behavior rather than `NotImplementedError` production stubs
 3. Implement per-row HMAC signing in `AuditLogger` and write unit tests asserting: (a) signing key comes from Vault, not env-var; (b) a mutated row fails HMAC verification; (c) an unmodified row passes — these tests become the Phase 3 tamper-detection baseline
 
 **Frontend & DevEx**
@@ -2037,9 +2043,9 @@ Phase 3 are listed below. These are not Phase 3 deliverables — they are the
 
 ---
 
-> **No-Go action:** any failing gate criterion or unchecked release requirement
-> blocks the `v0.4.0` tag. The owning team has one remediation sprint (one week);
-> the full gate re-runs after fixes are merged to `main`.
+> **Status:** Gate 2 has passed and `v0.4.0` is published. The checklist above
+> remains the release audit record for Phase 2; all new roadmap execution now
+> targets the Phase 3 backlog below.
 
 ---
 
